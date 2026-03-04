@@ -11,5 +11,8 @@ setup(
         "requests>=2.31.0",
         "python-dotenv>=1.0.0",
         "mcp>=1.0.0",
+        "scipy>=1.13.0",
+        "numpy>=2.0.0",
+        "pandas>=2.0.0",
     ],
 )
