@@ -1,5 +1,4 @@
-from pricing import price_bond
-
+from core.pricing import price_bond
 BUMP = 0.0001
 
 def modified_duration(face_value, coupon_rate, years_to_maturity, yield_rate, frequency=2):

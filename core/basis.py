@@ -40,3 +40,6 @@ if __name__ == "__main__":
 
     print("Futures implied:", 97.00 * 0.9750)  # Should be close to cash price
     print("Implied repo:", implied_repo(cash_price, futures_price, conversion_factor, coupon_rate, days_to_delivery))
+
+
+#fredapi = 6b7d1e80e07184ec932224819620d112
