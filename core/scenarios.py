@@ -1,9 +1,42 @@
-def parallel_shift(curve, shift_bps):
-    shift = shift_bps / 10000
+"""
+Yield curve scenario engine.
+
+All shift magnitudes are expressed in basis points (bps).
+Curves are represented as ``dict[str, float]`` mapping maturity label
+(e.g. "2Y", "10Y") to yield in decimal form (e.g. 0.045 for 4.5%).
+"""
+
+from __future__ import annotations
+
+
+def parallel_shift(curve: dict[str, float], shift_bps: float) -> dict[str, float]:
+    """Shift every maturity by the same number of basis points.
+
+    Args:
+        curve: Yield curve mapping maturity label to decimal yield.
+        shift_bps: Shift in basis points (positive = higher rates).
+
+    Returns:
+        New yield curve with the shift applied.
+    """
+    shift = shift_bps / 10_000
     return {maturity: rate + shift for maturity, rate in curve.items()}
 
-def bear_steepening(curve, shift_bps):
-    shift = shift_bps / 10000
+
+def bear_steepening(curve: dict[str, float], shift_bps: float) -> dict[str, float]:
+    """Long-end rates rise more than short-end (steeper curve, higher rates).
+
+    The shift is linearly interpolated from 0 bps at the short end to
+    ``shift_bps`` at the long end.
+
+    Args:
+        curve: Yield curve mapping maturity label to decimal yield.
+        shift_bps: Maximum shift in basis points applied at the long end.
+
+    Returns:
+        New yield curve with bear steepening applied.
+    """
+    shift = shift_bps / 10_000
     maturities = list(curve.keys())
     n = len(maturities)
     return {
@@ -11,8 +44,21 @@ def bear_steepening(curve, shift_bps):
         for i, (maturity, rate) in enumerate(curve.items())
     }
 
-def bear_flattening(curve, shift_bps):
-    shift = shift_bps / 10000
+
+def bear_flattening(curve: dict[str, float], shift_bps: float) -> dict[str, float]:
+    """Short-end rates rise more than long-end (flatter curve, higher rates).
+
+    The shift is linearly interpolated from ``shift_bps`` at the short end
+    down to 0 bps at the long end.
+
+    Args:
+        curve: Yield curve mapping maturity label to decimal yield.
+        shift_bps: Maximum shift in basis points applied at the short end.
+
+    Returns:
+        New yield curve with bear flattening applied.
+    """
+    shift = shift_bps / 10_000
     maturities = list(curve.keys())
     n = len(maturities)
     return {
@@ -20,20 +66,22 @@ def bear_flattening(curve, shift_bps):
         for i, (maturity, rate) in enumerate(curve.items())
     }
 
-def custom_shift(curve, shifts_bps):
+
+def custom_shift(
+    curve: dict[str, float], shifts_bps: dict[str, float]
+) -> dict[str, float]:
+    """Apply per-maturity shifts.
+
+    Maturities not present in ``shifts_bps`` are left unchanged.
+
+    Args:
+        curve: Yield curve mapping maturity label to decimal yield.
+        shifts_bps: Mapping of maturity label to shift in basis points.
+
+    Returns:
+        New yield curve with the per-maturity shifts applied.
+    """
     return {
-        maturity: rate + shifts_bps.get(maturity, 0) / 10000
+        maturity: rate + shifts_bps.get(maturity, 0) / 10_000
         for maturity, rate in curve.items()
     }
-
-if __name__ == "__main__":
-    curve = {
-        "3M": 0.040, "2Y": 0.043, "5Y": 0.044,
-        "10Y": 0.046, "30Y": 0.048
-    }
-
-    print("Original:       ", curve)
-    print("Parallel +50bps:", parallel_shift(curve, 50))
-    print("Bear steepening:", bear_steepening(curve, 100))
-    print("Bear flattening:", bear_flattening(curve, 100))
-    print("Custom:         ", custom_shift(curve, {"2Y": 25, "10Y": 50, "30Y": 100}))
