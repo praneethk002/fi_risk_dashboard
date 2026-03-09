@@ -312,33 +312,19 @@ def nelson_siegel_fit(
     maturities_yrs: list[float],
     yields_pct: list[float],
 ) -> dict:
-    """Fit the Nelson-Siegel (1987) model to observed yield curve data.
+    """Fit the Nelson-Siegel model to observed yield curve data.
 
-    The NS model decomposes the yield curve into three economically meaningful
-    factors that macro fixed income desks use for risk attribution:
-
-      β₀ — Long-run level: where all yields converge at infinite maturity.
-            Represents market's long-term inflation + real rate expectation.
-      β₁ — Slope: negative = normal (upward-sloping) curve; positive = inverted.
-            Approximately equal to (short_rate − long_rate).
-      β₂ — Curvature: hump or trough in the belly (5Y sector).
-            Positive = 5Y belly is cheap vs wings (long butterfly exposure).
-      λ  — Decay speed: maturity (years) where slope/curvature loadings peak.
-
-    RMSE < 2bps indicates an excellent fit to the data.
+    β₀ = long-run level, β₁ = slope, β₂ = curvature, λ = decay speed.
+    RMSE < 2bps = excellent fit.
 
     Args:
-        maturities_yrs: Pillar maturities in years (e.g., [0.25, 2, 5, 10, 30]).
-        yields_pct: Corresponding yields as percentages (e.g., [5.3, 4.9, 4.6, 4.5, 4.7]).
+        maturities_yrs: Pillar maturities in years (e.g. [0.25, 2, 5, 10, 30]).
+        yields_pct: Corresponding yields as percentages.
 
     Returns:
         {
-          "beta0_pct": <long-run level in %>,
-          "beta1_pct": <slope in %>,
-          "beta2_pct": <curvature in %>,
-          "lambda_yrs": <decay speed in years>,
-          "fit_rmse_bps": <root-mean-square fitting error in bps>,
-          "curve_shape": <"normal" | "inverted" | "flat" | "humped">
+          "beta0_pct", "beta1_pct", "beta2_pct", "lambda_yrs",
+          "fit_rmse_bps", "curve_shape": "normal"|"inverted"|"flat"|"humped"
         }
     """
     mats = np.array(maturities_yrs, dtype=float)
@@ -377,31 +363,21 @@ def carry_roll_analysis(
     repo_rate_pct: float,
     frequency: int = 2,
 ) -> dict:
-    """Carry + roll-down return assuming a static Treasury yield curve.
+    """Carry + roll-down return for 3M, 6M, and 1Y horizons.
 
-    The carry + roll is the "free money" from being long duration on a
-    steep curve: coupon income minus repo financing cost, plus price
-    appreciation from rolling to a shorter (lower-yielding) maturity.
-
-    The forward breakeven yield is the yield the bond must reach at the
-    horizon to exactly zero out the carry + roll profit. A steep curve
-    means the breakeven is well above the current yield — providing a
-    substantial cushion against rate rises.
-
-    Uses the live US Treasury spot curve (FRED) to compute roll-down.
-    Falls back to a representative curve if FRED is unavailable.
+    Uses the live FRED spot curve. Each horizon reports coupon accrual,
+    financing cost, net carry, roll-down, total, and forward breakeven yield.
 
     Args:
         face_value: Principal (e.g. 1000).
         coupon_rate_pct: Annual coupon as a percentage.
         years_to_maturity: Remaining life in years.
         ytm_pct: Yield to maturity as a percentage.
-        repo_rate_pct: Overnight/term repo rate as a percentage.
+        repo_rate_pct: Repo financing rate as a percentage.
         frequency: Coupon payments per year (2 = semi-annual).
 
     Returns:
-        Dict with carry, roll-down, and total for 3M, 6M, and 1Y horizons.
-        Each horizon also reports the forward breakeven yield.
+        Dict keyed by horizon ("3M", "6M", "1Y"), each with carry/roll metrics.
     """
     bond = Bond(
         face_value=face_value,
@@ -443,42 +419,23 @@ def z_spread_analysis(
     dirty_price: float | None = None,
     frequency: int = 2,
 ) -> dict[str, float | str]:
-    """Z-spread (zero-volatility spread) over the live Treasury spot curve.
+    """Z-spread over the live FRED Treasury spot curve.
 
-    The Z-spread is the constant spread added to every point on the Treasury
-    spot curve that makes the present value of the bond's cash flows equal its
-    market price. It is the single most comparable spread metric across bonds
-    with different coupon structures.
-
-    Comparison with simpler spread measures:
-      Yield spread — YTM minus the on-the-run Treasury yield at nearest maturity.
-                     Ignores the shape of the yield curve entirely.
-      Z-spread     — constant spread over the full spot curve; properly accounts
-                     for cash flows at all maturities.
-      OAS          — Z-spread adjusted for embedded options; requires a rate model.
-
-    Positive Z-spread: bond is cheap vs Treasuries (carries a risk premium).
-    Negative Z-spread: bond is rich vs Treasuries (e.g. off-the-run richness, special).
-
-    Uses live FRED Treasury spot curve. If dirty_price is omitted, the bond is
-    priced at its input YTM (assumes settlement on a coupon date).
+    Positive = bond cheap vs Treasuries; negative = rich.
+    If dirty_price is omitted, it is computed from ytm_pct.
 
     Args:
         face_value: Principal (e.g. 1000).
         coupon_rate_pct: Annual coupon as a percentage.
         years_to_maturity: Remaining life in years.
-        ytm_pct: Yield to maturity as a percentage (used to compute dirty price
-            if dirty_price is not supplied).
-        dirty_price: Invoice price (optional). If None, computed from ytm_pct.
+        ytm_pct: Yield to maturity as a percentage.
+        dirty_price: Invoice price (optional).
         frequency: Coupon payments per year.
 
     Returns:
         {
-          "dirty_price": <invoice price>,
-          "z_spread_bps": <Z-spread in basis points>,
-          "treasury_spot_rate_pct": <Treasury spot rate at bond maturity>,
-          "yield_spread_bps": <simple yield spread = YTM − Treasury spot>,
-          "compounding_note": <convention description>
+          "dirty_price", "z_spread_bps", "treasury_spot_rate_pct",
+          "yield_spread_bps", "compounding_note"
         }
     """
     bond = Bond(
@@ -514,28 +471,15 @@ def z_spread_analysis(
 def curve_spread_metrics() -> dict[str, float | str]:
     """Live US Treasury curve spread metrics from FRED.
 
-    These are the primary relative value signals for macro fixed income desks:
-
-      2s10s (bps)       — The most-watched recession indicator. Negative
-                          (inverted) when the Fed is hiking aggressively.
-                          Turned negative in March 2022, went as low as −108bps
-                          in July 2023, re-steepened as the cutting cycle began.
-
-      5s30s (bps)       — Long-end steepness. Driven by term premium and fiscal
-                          supply dynamics. A steep 5s30s generates positive
-                          carry + roll for duration longs in the 10–30Y sector.
-
-      2s5s10s fly (bps) — Mid-curve richness. Positive = 5Y belly is cheap vs
-                          the 2Y/10Y wings (negative curvature in NS terms:
-                          β₂ < 0). A long butterfly (long belly, short wings)
-                          profits when curvature increases.
+    Returns 2s10s, 5s30s, and 2s5s10s butterfly spreads in basis points,
+    along with a curve regime classification and data source label.
 
     Returns:
         {
-          "2s10s_bps": <10Y − 2Y in bps>,
-          "5s30s_bps": <30Y − 5Y in bps>,
-          "2s5s10s_fly_bps": <2×5Y − 2Y − 10Y in bps>,
-          "curve_regime": <"steep" | "flat" | "inverted">,
+          "2s10s_bps": <10Y − 2Y>,
+          "5s30s_bps": <30Y − 5Y>,
+          "2s5s10s_fly_bps": <2×5Y − 2Y − 10Y>,
+          "curve_regime": "steep"|"flat"|"inverted",
           "source": "FRED"
         }
     """

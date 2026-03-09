@@ -1,36 +1,13 @@
 """
-Yield curve modelling: Nelson-Siegel fitting, cubic spline interpolation,
-and spot rate bootstrapping.
+Yield curve modelling: Nelson-Siegel (1987) fitting, spot rate bootstrapping,
+and cubic spline interpolation.
 
-The Nelson-Siegel (1987) model decomposes the yield curve into three
-economically interpretable factors:
+Nelson-Siegel model:
+    r(τ) = β₀ + β₁·L(τ) + β₂·C(τ)
+    L(τ) = (1 − e^{−τ/λ}) / (τ/λ)   # slope loading
+    C(τ) = L(τ) − e^{−τ/λ}           # curvature loading
 
-    r(τ) = β₀ + β₁ · L(τ) + β₂ · C(τ)
-
-    L(τ) = (1 - e^{-τ/λ}) / (τ/λ)      ← slope loading
-    C(τ) = L(τ) − e^{-τ/λ}              ← curvature loading
-
-Parameters
-----------
-β₀  Long-run level.  The yield all maturities converge to as τ → ∞.
-    Represents the market's long-term inflation + real rate expectation.
-
-β₁  Slope.  The short-run deviation from the long-run level.
-    Negative β₁ = normal (upward-sloping) curve.
-    Positive β₁ = inverted curve (2023–2024 US experience).
-    β₁ ≈ short_rate − long_rate.
-
-β₂  Curvature.  The medium-maturity hump or trough.
-    Positive β₂ = hump (5Y belly cheapened vs wings = butterfly > 0).
-    Negative β₂ = trough (belly rich vs wings).
-
-λ   Decay speed.  The maturity (in years) at which slope/curvature
-    loadings peak. Typical calibration for US Treasuries: 1.5–2.5 years.
-
-References
-----------
-Nelson, C.R. & Siegel, A.F. (1987). "Parsimonious Modeling of Yield Curves."
-    Journal of Business, 60(4), 473–489.
+β₀ = long-run level, β₁ = slope, β₂ = curvature, λ = decay speed (years).
 """
 
 from __future__ import annotations
@@ -103,23 +80,14 @@ def fit_nelson_siegel(
     maturities_yrs: np.ndarray,
     yields_decimal: np.ndarray,
 ) -> NelsonSiegelParams:
-    """Fit the Nelson-Siegel model to observed yields via L-BFGS-B.
-
-    Minimises the sum of squared errors (SSE) between model and observed
-    yields subject to economically motivated parameter bounds.
-
-    Initial guess heuristic:
-      β₀ = long-end yield  (proxy for long-run anchor)
-      β₁ = short_end − long_end  (inverted sign convention)
-      β₂ = 0  (no curvature prior)
-      λ  = 1.5  (standard US Treasury calibration)
+    """Fit the Nelson-Siegel model via L-BFGS-B minimisation of SSE.
 
     Args:
         maturities_yrs: Pillar maturities in years, shape (N,), sorted ascending.
         yields_decimal: Observed yields as decimals, shape (N,).
 
     Returns:
-        :class:`NelsonSiegelParams` with fitted parameters and RMSE.
+        NelsonSiegelParams with fitted parameters and RMSE in bps.
 
     Raises:
         ValueError: If arrays have mismatched lengths.
@@ -171,22 +139,15 @@ def decompose_curve_shift(
     params_before: NelsonSiegelParams,
     params_after: NelsonSiegelParams,
 ) -> dict[str, float]:
-    """Express a curve move as changes in level, slope, and curvature.
-
-    This is the standard P&L attribution framework used by macro fixed income
-    desks. After a yield curve shift:
-
-      Δβ₀ (level)     → parallel move — affects all DV01-weighted positions.
-      Δβ₁ (slope)     → steepening / flattening — 2s10s spread trades.
-      Δβ₂ (curvature) → butterfly — 2s5s10s or 5s10s30s trades.
+    """Decompose a curve move into changes in NS level, slope, and curvature.
 
     Args:
         params_before: NS parameters at the start of the period.
-        params_after:  NS parameters at the end of the period.
+        params_after: NS parameters at the end of the period.
 
     Returns:
         Dict with "delta_level_bps", "delta_slope_bps", "delta_curvature_bps",
-        "delta_lambda" (not in bps — dimensionless year shift).
+        and "delta_lambda" (dimensionless, in years).
     """
     return {
         "delta_level_bps":     (params_after.beta0  - params_before.beta0)  * 10_000,
@@ -199,23 +160,14 @@ def decompose_curve_shift(
 # ── Spot curve interpolation ─────────────────────────────────────────────────
 
 class SpotCurve:
-    """Cubic spline interpolation of a Treasury spot (zero) rate curve.
+    """Cubic spline interpolation of a zero-coupon spot rate curve.
 
-    The spot curve is the foundation for no-arbitrage, multi-cashflow pricing.
-    Each cash flow is discounted at the zero rate for its specific maturity
-    rather than a single flat yield — this is the correct pricing approach.
+    Discount factors use continuous compounding: DF(τ) = e^{−z(τ)·τ}.
+    Spline uses not-a-knot boundary conditions (scipy default).
 
-    Interpolation uses scipy's ``CubicSpline`` with ``not-a-knot`` boundary
-    conditions, which is standard in fixed income term structure models.
-    Continuous compounding is used for discount factors to avoid
-    frequency-conversion errors.
-
-    Parameters
-    ----------
-    maturities_yrs : np.ndarray
-        Pillar maturities in years, sorted ascending.
-    spot_rates_decimal : np.ndarray
-        Spot (zero) rates at each pillar as decimals.
+    Args:
+        maturities_yrs: Pillar maturities in years, sorted ascending.
+        spot_rates_decimal: Spot rates at each pillar as decimals.
     """
 
     def __init__(
@@ -254,15 +206,7 @@ class SpotCurve:
         return np.exp(-z * t)
 
     def forward_rate(self, t1: float, t2: float) -> float:
-        """Instantaneous forward rate for the period [t1, t2].
-
-        Derived from no-arbitrage via continuous compounding:
-
-            f(t1, t2) = [z(t2)·t2 − z(t1)·t1] / (t2 − t1)
-
-        Economic interpretation: the repo rate that must be achieved on a bond
-        rolled from maturity t1 to t2 for the investor to be indifferent between
-        holding the t2 bond outright and rolling at the t1 rate.
+        """Forward rate for [t1, t2] via no-arbitrage: [z(t2)·t2 − z(t1)·t1] / (t2 − t1).
 
         Args:
             t1: Start of forward period in years.
@@ -311,29 +255,21 @@ def bootstrap_spot_rates(
     par_yields_decimal: np.ndarray,
     frequency: int = 2,
 ) -> np.ndarray:
-    """Bootstrap zero (spot) rates from par Treasury yields.
+    """Strip zero rates from par yields by sequential bootstrapping.
 
-    The bootstrap strips coupon bonds sequentially: given all shorter-maturity
-    spot rates, the zero rate at the next maturity is the unique rate that prices
-    the corresponding par bond at par. This is the standard US Treasury stripping
-    methodology (equivalent to the Fed's Svensson model inputs).
-
-    Algorithm (semi-annual, generalised):
-        For each maturity n:
-            1 = Σ_{t=1}^{n-1} [c/f / (1+z_t/f)^t] + [(1 + c/f) / (1+z_n/f)^n]
-            Solve for z_n using brentq.
+    For each maturity, solves for z_n such that the par bond prices at par
+    given all previously bootstrapped spot rates. Uses Brent's method.
 
     Args:
         maturities_yrs: Sorted pillar maturities in years, shape (N,).
         par_yields_decimal: Par yields as decimals, shape (N,).
-            A par bond prices at exactly 1.0 per unit of face value.
-        frequency: Coupon payments per year (2 = semi-annual, US Treasury default).
+        frequency: Coupon payments per year (default 2, semi-annual).
 
     Returns:
         Bootstrapped spot rates as decimals, shape (N,).
 
     Raises:
-        ValueError: If the root cannot be bracketed at any maturity pillar.
+        ValueError: If the root cannot be bracketed at any pillar.
     """
     maturities = np.asarray(maturities_yrs, dtype=float)
     par_yields = np.asarray(par_yields_decimal, dtype=float)

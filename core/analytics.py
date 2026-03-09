@@ -1,30 +1,8 @@
 """
-Advanced fixed income analytics: carry, roll-down, z-spread, and forward
-breakeven yield.
+Fixed income analytics: carry, roll-down, Z-spread, and total return decomposition.
 
-These metrics constitute the core of how macro fixed income practitioners
-evaluate bond positions. The hierarchy of sophistication:
-
-  Level 1 — Yield to maturity:         "This bond yields 4.6%."
-  Level 2 — Duration / DV01:           "I lose $780 per $1M per basis point."
-  Level 3 — Carry + roll-down:         "I earn 120bps over 3 months if the curve
-                                         doesn't move."
-  Level 4 — Z-spread vs spot curve:    "This bond is 15bps cheap vs Treasuries."
-  Level 5 — Forward breakeven:         "The 10Y must sell off 25bps before I lose
-                                         money over the quarter."
-
-A Capula-style relative value fund operates at levels 3–5 daily.
-
-Continuous vs periodic compounding
------------------------------------
-All discount factors in this module use continuous compounding
-(DF = e^{-z·τ}) to interface cleanly with the SpotCurve returned by
-core.curves. Cash flows from the Bond object are discounted at continuous
-rates interpolated from the spline.
-
-The price_bond function in core.pricing uses periodic compounding (the
-market convention for quoted bond prices). The two are reconciled when
-constructing a SpotCurve from bootstrapped or NS-fitted spot rates.
+Discount factors use continuous compounding (DF = e^{-z·τ}) to interface with
+SpotCurve. Bond market prices use periodic compounding per core.pricing convention.
 """
 
 from __future__ import annotations
@@ -118,38 +96,20 @@ def z_spread(
     dirty_price: float,
     spot_curve: SpotCurve,
 ) -> float:
-    """Z-spread: constant spread over the Treasury spot curve that prices the bond.
+    """Constant spread over the Treasury spot curve that equates PV to dirty price.
 
-    The Z-spread (zero-volatility spread) solves for s in:
-
-        P_dirty = Σ_{t} CF_t · e^{−(z(t) + s) · t}
-
-    where z(t) is the interpolated spot rate at maturity t and CF_t is the
-    cash flow (coupon or coupon + principal) at time t.
-
-    Comparison with other spread metrics
-    -------------------------------------
-    Yield spread  — computed vs a single benchmark yield; ignores curve shape.
-    Par spread    — assumes a flat discount curve at the bond's own yield.
-    Z-spread      — uses the full spot curve as the risk-free base; comparable
-                    across bonds with different coupon structures.
-    OAS           — Z-spread after stripping out embedded option value (calls,
-                    puts); requires a rate model. Not implemented here.
-
-    A positive Z-spread means the bond offers excess yield over Treasuries —
-    it is "cheap" vs the risk-free curve.
+    Solves for s in: P_dirty = Σ CF_t · e^{−(z(t) + s) · t}
 
     Args:
-        bond: Bond specification (coupon, maturity, face value, frequency).
-        dirty_price: Observed full (invoice) price in the same units as
-            ``bond.face_value``.
-        spot_curve: Fitted :class:`~core.curves.SpotCurve` for discounting.
+        bond: Bond specification.
+        dirty_price: Observed invoice price in the same units as bond.face_value.
+        spot_curve: Treasury spot curve for discounting.
 
     Returns:
         Z-spread as a decimal (e.g. 0.0025 = +25 bps).
 
     Raises:
-        ValueError: If the bond cannot be priced within ±500 / +5000 bps.
+        ValueError: If the root cannot be bracketed within [−500bps, +5000bps].
     """
     times = bond.cashflow_times()           # shape (n,)
     cfs = bond.cashflows()                  # shape (n,)
@@ -206,29 +166,19 @@ def roll_down_return(
     spot_curve: SpotCurve,
     holding_period_yrs: float = HOLD_3M,
 ) -> RollDownResult:
-    """Carry + roll-down total return assuming a static yield curve.
+    """Carry + roll-down return assuming the spot curve is unchanged.
 
-    The roll-down assumption: the yield curve shape is completely unchanged
-    over the holding period. As calendar time passes, a 10Y bond becomes a
-    9.75Y bond (after 3 months). If the curve is upward-sloping, the 9.75Y
-    spot rate is lower than the 10Y rate, so the bond price rises. This
-    appreciation is the roll-down.
-
-    Why this matters for Capula's strategy
-    ----------------------------------------
-    Carry + roll is the "free money" from being long duration on a steep
-    curve. A fund that is long the 5Y–10Y sector collects both the coupon
-    carry and the roll-down even with zero net change in yields. The forward
-    breakeven tells you exactly how much the curve must move against you
-    before this carry + roll is wiped out.
+    As the bond rolls to a shorter maturity, its price adjusts to the spot rate
+    at that maturity. On an upward-sloping curve this produces a positive roll.
+    The forward breakeven yield is where carry + roll is exactly offset.
 
     Args:
         bond: Bond specification.
-        spot_curve: Current spot curve — assumed static over holding period.
-        holding_period_yrs: Calendar time elapsed (default 3 months = 0.25yr).
+        spot_curve: Current spot curve, assumed static over the holding period.
+        holding_period_yrs: Calendar time elapsed (default 3 months).
 
     Returns:
-        :class:`RollDownResult` NamedTuple with all return components.
+        RollDownResult with all return components.
 
     Raises:
         ValueError: If holding_period_yrs >= bond.years_to_maturity.
@@ -312,28 +262,19 @@ def total_return_decomposition(
     modified_duration: float | None = None,
     convexity: float | None = None,
 ) -> TotalReturnDecomposition:
-    """Full P&L attribution split into carry, roll, duration, and convexity.
-
-    This decomposition is how fixed income risk managers report position
-    performance. Each component is independently controllable:
-
-      Carry       → hedged via repo rate (repo-funded long duration)
-      Roll-down   → hedged by selling forward (locking in the forward yield)
-      Duration P&L → hedged via futures DV01 overlay
-      Convexity   → hedged via options (vega / gamma)
+    """P&L attribution: carry, roll-down, duration, and convexity components.
 
     Args:
         bond: Bond specification.
-        spot_curve: Current spot curve (assumed static for carry + roll).
-        repo_rate: Overnight / term repo rate for financing the position.
+        spot_curve: Current spot curve, assumed static for carry + roll.
+        repo_rate: Repo financing rate as a decimal.
         holding_period_yrs: Horizon in years.
-        yield_change: Parallel yield shift in decimal over the holding period
-            (e.g. +0.005 = +50bps). Default 0 = carry-only scenario.
-        modified_duration: If None, estimated numerically from the spot curve.
-        convexity: If None, estimated numerically from the spot curve.
+        yield_change: Parallel yield shift as a decimal (e.g. +0.005 = +50bps).
+        modified_duration: Pre-computed value; computed from YTM if None.
+        convexity: Pre-computed value; computed from YTM if None.
 
     Returns:
-        :class:`TotalReturnDecomposition` NamedTuple.
+        TotalReturnDecomposition NamedTuple.
     """
     from core.risk import modified_duration as _md, convexity as _cvx
 
@@ -368,35 +309,16 @@ def total_return_decomposition(
 # ── Curve spread metrics ──────────────────────────────────────────────────────
 
 def curve_spreads(curve: dict[str, float]) -> dict[str, float]:
-    """Calculate standard US Treasury yield curve spread metrics.
-
-    These spreads are the primary relative value signals for macro fixed income
-    and are referenced directly in conversations about curve trades:
-
-      2s10s (basis)     — The most-watched recession indicator. Negative
-                          (inverted) when the Fed is hiking and the front end
-                          rises faster than the long end. Turned negative in
-                          2022 and drove carry + roll negative for 2Y holders.
-
-      5s30s (basis)     — Long-end steepness. Driven by term premium and
-                          fiscal supply dynamics. Capula uses this sector for
-                          positive carry + roll trades on a steep curve.
-
-      2s5s10s butterfly  — Mid-curve richness. Positive = 5Y belly is cheap vs
-                          the 2Y/10Y wings. A long butterfly (long belly, short
-                          wings) profits when curvature increases. The standard
-                          expression for a β₂ view in Nelson-Siegel terms.
+    """Standard Treasury curve spread metrics: 2s10s, 5s30s, 2s5s10s butterfly.
 
     Args:
-        curve: Mapping of maturity label to decimal yield.
-            Must contain keys "2Y", "5Y", "10Y", and "30Y".
+        curve: Maturity label → decimal yield. Must contain "2Y", "5Y", "10Y", "30Y".
 
     Returns:
-        Dict with "2s10s_bps", "5s30s_bps", "2s5s10s_fly_bps", all in
-        basis points. Negative 2s10s indicates a yield curve inversion.
+        Dict with "2s10s_bps", "5s30s_bps", "2s5s10s_fly_bps" in basis points.
 
     Raises:
-        KeyError: If any required maturity is missing from ``curve``.
+        KeyError: If any required maturity is missing.
     """
     required = {"2Y", "5Y", "10Y", "30Y"}
     missing = required - curve.keys()
