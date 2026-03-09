@@ -67,6 +67,52 @@ def bear_flattening(curve: dict[str, float], shift_bps: float) -> dict[str, floa
     }
 
 
+def bull_steepening(curve: dict[str, float], shift_bps: float) -> dict[str, float]:
+    """Short-end rates fall more than long-end (steeper curve, lower rates).
+
+    Typical drivers: Fed signals easing while long-end anchored by term premium.
+    The short end drops by ``shift_bps``; the long end is unchanged. Shifts
+    are linearly interpolated from −shift_bps at the front to 0 at the back.
+
+    Args:
+        curve: Yield curve mapping maturity label to decimal yield.
+        shift_bps: Magnitude of the short-end drop in basis points (positive value).
+
+    Returns:
+        New yield curve with bull steepening applied.
+    """
+    shift = shift_bps / 10_000
+    maturities = list(curve.keys())
+    n = len(maturities)
+    return {
+        maturity: rate - shift * (1 - i / (n - 1))
+        for i, (maturity, rate) in enumerate(curve.items())
+    }
+
+
+def bull_flattening(curve: dict[str, float], shift_bps: float) -> dict[str, float]:
+    """Long-end rates fall more than short-end (flatter curve, lower rates).
+
+    Typical drivers: flight to quality, disinflation, strong duration demand.
+    The long end drops by ``shift_bps``; the short end is unchanged. Shifts
+    are linearly interpolated from 0 at the front to −shift_bps at the back.
+
+    Args:
+        curve: Yield curve mapping maturity label to decimal yield.
+        shift_bps: Magnitude of the long-end drop in basis points (positive value).
+
+    Returns:
+        New yield curve with bull flattening applied.
+    """
+    shift = shift_bps / 10_000
+    maturities = list(curve.keys())
+    n = len(maturities)
+    return {
+        maturity: rate - shift * (i / (n - 1))
+        for i, (maturity, rate) in enumerate(curve.items())
+    }
+
+
 def custom_shift(
     curve: dict[str, float], shifts_bps: dict[str, float]
 ) -> dict[str, float]:

@@ -42,17 +42,21 @@ _CACHE_TTL_SECONDS = 300  # 5 minutes
 def fetch_latest_rate(series_id: str) -> Optional[float]:
     """Fetch the most recent non-missing observation for a FRED series.
 
-    Results are cached for 5 minutes to avoid hammering the API.
+    Results are cached for 5 minutes. Returns None if no API key is set
+    or if the series has no valid observations.
 
     Args:
         series_id: FRED series identifier (e.g. "DGS10").
 
     Returns:
-        Latest rate as a decimal, or ``None`` if unavailable.
+        Latest rate as a decimal, or None if unavailable.
 
     Raises:
         RuntimeError: If the FRED API returns a non-200 status code.
     """
+    if not FRED_API_KEY:
+        return None
+
     now = time.monotonic()
     cached_value, cached_at = _cache.get(series_id, (None, 0.0))
     if now - cached_at < _CACHE_TTL_SECONDS and cached_value is not None:
