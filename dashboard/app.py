@@ -400,7 +400,7 @@ with tabs[0]:
             ))
 
         fig_curve.update_layout(
-            **_PLOTLY_BASE,
+            **{k: v for k, v in _PLOTLY_BASE.items() if k not in ("xaxis", "yaxis")},
             height=340,
             xaxis=dict(**_PLOTLY_BASE["xaxis"], title="Maturity (years)"),
             yaxis=dict(**_PLOTLY_BASE["yaxis"], title="Yield (%)"),
@@ -506,7 +506,7 @@ with tabs[1]:
             annotation_font=dict(color=_C_AMBER, size=10),
         )
         fig_py.update_layout(
-            **_PLOTLY_BASE,
+            **{k: v for k, v in _PLOTLY_BASE.items() if k not in ("xaxis", "yaxis")},
             height=310,
             xaxis=dict(**_PLOTLY_BASE["xaxis"], title="YTM (%)"),
             yaxis=dict(**_PLOTLY_BASE["yaxis"], title="Price ($)"),
@@ -592,7 +592,7 @@ with tabs[2]:
                     totals=dict(   marker=dict(color=_C_BLUE,   line=dict(color=_C_BLUE,  width=0))),
                 ))
                 fig_wf.update_layout(
-                    **_PLOTLY_BASE,
+                    **{k: v for k, v in _PLOTLY_BASE.items() if k != "yaxis"},
                     height=300,
                     title=dict(text=f"{label} Horizon", font=dict(color="#e6edf3", size=12), x=0.5),
                     showlegend=False,
@@ -671,7 +671,7 @@ with tabs[2]:
                 ))
                 fig_trd.add_hline(y=0, line=dict(color="#30363d", width=1))
                 fig_trd.update_layout(
-                    **_PLOTLY_BASE,
+                    **{k: v for k, v in _PLOTLY_BASE.items() if k != "yaxis"},
                     height=270,
                     showlegend=False,
                     yaxis=dict(**_PLOTLY_BASE["yaxis"], title="Return (%)"),
@@ -730,7 +730,7 @@ with tabs[3]:
             opacity=0.4,
         ))
     fig_sc.update_layout(
-        **_PLOTLY_BASE,
+        **{k: v for k, v in _PLOTLY_BASE.items() if k not in ("xaxis", "yaxis")},
         height=310,
         xaxis=dict(**_PLOTLY_BASE["xaxis"], title="Maturity (years)"),
         yaxis=dict(**_PLOTLY_BASE["yaxis"], title="Yield (%)"),
@@ -895,7 +895,7 @@ with tabs[4]:
                     annotation_font=dict(color="#8b949e", size=10),
                 )
                 fig_zs.update_layout(
-                    **_PLOTLY_BASE,
+                    **{k: v for k, v in _PLOTLY_BASE.items() if k not in ("xaxis", "yaxis")},
                     height=300,
                     xaxis=dict(**_PLOTLY_BASE["xaxis"], title="Maturity (years)"),
                     yaxis=dict(**_PLOTLY_BASE["yaxis"], title="Rate (%)"),
@@ -1027,7 +1027,7 @@ with tabs[5]:
         annotation_font=dict(color=_C_GREEN, size=10),
     )
     fig_basis.update_layout(
-        **_PLOTLY_BASE,
+        **{k: v for k, v in _PLOTLY_BASE.items() if k not in ("xaxis", "yaxis")},
         height=260,
         xaxis=dict(**_PLOTLY_BASE["xaxis"], title="Repo Rate (%)"),
         yaxis=dict(**_PLOTLY_BASE["yaxis"], title="Net Basis (pts)"),
