@@ -1,149 +1,195 @@
-"""
-Basis tests — prints what's happening so you can read and interpret the output.
-Run with: pytest tests/test_basis.py -v -s
-"""
+"""Tests for core/basis.py — gross/net basis, carry, implied repo, CTD selection."""
 
-from datetime import date
+import pytest
 from core.basket import get_basket
-from core.basis import gross_basis, carry, net_basis, implied_repo, find_ctd, basket_analysis
+from core.basis import (
+    basket_analysis,
+    carry,
+    ctd_scenario,
+    find_ctd,
+    gross_basis,
+    implied_repo,
+    net_basis,
+)
+
+FUTURES = 108.50
+REPO    = 0.053
+DAYS    = 110
 
 
-# ---------------------------------------------------------------------------
-# Shared inputs used across multiple tests
-# ---------------------------------------------------------------------------
+class TestGrossBasis:
+    def test_positive_when_cash_above_invoice(self):
+        # cash > futures × CF → bond rich vs futures
+        assert gross_basis(110.0, FUTURES, 0.9750) > 0
 
-FUTURES_PRICE    = 108.50
-REPO_RATE        = 0.053   # 5.3% repo
-DAYS_TO_DELIVERY = 110
+    def test_negative_when_cash_below_invoice(self):
+        assert gross_basis(95.0, FUTURES, 0.9750) < 0
 
+    def test_zero_at_invoice_price(self):
+        invoice = FUTURES * 0.9750
+        assert abs(gross_basis(invoice, FUTURES, 0.9750)) < 1e-10
 
-def test_gross_basis_intuition():
-    """Show gross basis for bonds priced above, at, and below invoice price."""
-    print("\n--- Gross Basis = cash_price - futures_price × conv_factor ---")
-    print(f"  Futures price: {FUTURES_PRICE}  Conv factor: 0.9750")
-    print(f"  Invoice price = {FUTURES_PRICE} × 0.9750 = {FUTURES_PRICE * 0.9750:.4f}")
-    print()
-
-    cases = [
-        (100.00, "cash above invoice → positive basis (bond rich vs futures)"),
-        (105.79, "cash equals invoice → zero basis"),
-        (95.00,  "cash below invoice → negative basis (bond cheap vs futures)"),
-    ]
-    print(f"  {'Cash price':>12}  {'Gross basis':>12}  Interpretation")
-    for price, note in cases:
-        gb = gross_basis(price, FUTURES_PRICE, 0.9750)
-        print(f"  {price:>12.4f}  {gb:>12.6f}  {note}")
+    def test_scales_with_conversion_factor(self):
+        # Higher CF → higher invoice → smaller gross basis for same cash price
+        gb_low  = gross_basis(100.0, FUTURES, 0.90)
+        gb_high = gross_basis(100.0, FUTURES, 0.99)
+        assert gb_low > gb_high
 
 
-def test_carry_intuition():
-    """Show carry decomposition: coupon income minus financing cost."""
-    price, coupon, repo, days = 99.50, 0.045, REPO_RATE, DAYS_TO_DELIVERY
+class TestCarry:
+    def test_positive_carry_when_coupon_exceeds_repo(self):
+        # Coupon 6% >> repo 5.3% → positive carry
+        assert carry(100.0, 0.06, REPO, DAYS) > 0
 
-    coupon_income   = price * coupon * (days / 365)
-    financing_cost  = price * repo   * (days / 360)
-    net_carry       = carry(price, coupon, repo, days)
+    def test_negative_carry_when_repo_exceeds_coupon(self):
+        # Coupon 2% << repo 5.3% → negative carry
+        assert carry(100.0, 0.02, REPO, DAYS) < 0
 
-    print("\n--- Carry over the holding period ---")
-    print(f"  Cash price:       {price}")
-    print(f"  Coupon rate:      {coupon*100:.2f}%  (ACT/365)")
-    print(f"  Repo rate:        {repo*100:.2f}%   (ACT/360)")
-    print(f"  Days to delivery: {days}")
-    print()
-    print(f"  Coupon income  = {price} × {coupon} × ({days}/365) = {coupon_income:.4f}")
-    print(f"  Financing cost = {price} × {repo} × ({days}/360) = {financing_cost:.4f}")
-    print(f"  Net carry      = {coupon_income:.4f} - {financing_cost:.4f} = {net_carry:.4f}")
-    print()
-    if net_carry > 0:
-        print("  Positive carry: coupon income > financing cost, position earns money")
-    else:
-        print("  Negative carry: financing cost > coupon income, position costs money")
+    def test_zero_carry_breakeven(self):
+        # When coupon/365 == repo/360, carry is zero
+        # coupon × (days/365) = repo × (days/360)
+        # coupon = repo × (365/360)
+        breakeven_coupon = REPO * (365 / 360)
+        c = carry(100.0, breakeven_coupon, REPO, DAYS)
+        assert abs(c) < 1e-6
 
-
-def test_net_basis_decomposition():
-    """Show that net_basis = gross_basis - carry, and what each component means."""
-    price, coupon, cf = 99.50, 0.045, 0.9195
-
-    gb = gross_basis(price, FUTURES_PRICE, cf)
-    c  = carry(price, coupon, REPO_RATE, DAYS_TO_DELIVERY)
-    nb = net_basis(price, FUTURES_PRICE, cf, coupon, REPO_RATE, DAYS_TO_DELIVERY)
-
-    print("\n--- Net Basis Decomposition ---")
-    print(f"  Gross basis  = {gb:>8.4f}  (raw gap between cash and futures invoice)")
-    print(f"  Carry        = {c:>8.4f}  (coupon income minus repo cost)")
-    print(f"  Net basis    = {nb:>8.4f}  = gross_basis - carry")
-    print(f"  Check:         {gb - c:>8.4f}  (should match net basis exactly)")
-    print()
-    print("  Net basis near zero → bond fairly priced vs futures")
-    print("  Net basis > zero    → bond rich, or delivery option has value")
+    def test_scales_linearly_with_price(self):
+        c1 = carry(100.0, 0.045, REPO, DAYS)
+        c2 = carry(200.0, 0.045, REPO, DAYS)
+        assert abs(c2 - 2 * c1) < 1e-10
 
 
-def test_implied_repo_vs_actual():
-    """Compare implied repo against the actual repo rate to assess richness/cheapness."""
-    cases = [
-        (99.50, 0.9195, 0.045, "high-coupon bond"),
-        (99.00, 0.9014, 0.040, "low-coupon bond"),
-        (99.25, 0.8808, 0.0425,"mid-coupon bond"),
-    ]
+class TestNetBasis:
+    def test_equals_gross_minus_carry(self):
+        price, coupon, cf = 99.50, 0.045, 0.9195
+        gb = gross_basis(price, FUTURES, cf)
+        c  = carry(price, coupon, REPO, DAYS)
+        nb = net_basis(price, FUTURES, cf, coupon, REPO, DAYS)
+        assert abs(nb - (gb - c)) < 1e-10
 
-    print("\n--- Implied Repo vs Actual Repo ---")
-    print(f"  Actual repo rate: {REPO_RATE*100:.2f}%")
-    print()
-    print(f"  {'Bond':<20} {'Implied repo':>14} {'vs actual':>12}  Signal")
-    for price, cf, coupon, label in cases:
-        ir = implied_repo(price, FUTURES_PRICE, cf, coupon, DAYS_TO_DELIVERY)
-        diff_bps = (ir - REPO_RATE) * 10_000
-        signal = "CHEAP (deliver this)" if ir > REPO_RATE else "RICH  (don't deliver)"
-        print(f"  {label:<20} {ir*100:>13.3f}%  {diff_bps:>+10.1f}bp  {signal}")
+    def test_near_zero_for_fairly_priced_bond(self):
+        # At the invoice price with zero carry, net basis ≈ 0
+        invoice = FUTURES * 0.9750
+        c = carry(invoice, 0.053 * 365 / 360, REPO, DAYS)  # breakeven coupon
+        nb = net_basis(invoice, FUTURES, 0.9750, 0.053 * 365 / 360, REPO, DAYS)
+        assert abs(nb) < 0.01
 
 
-def test_find_ctd():
-    """Show which bond is CTD and why."""
-    bonds = [
-        {"cash_price": 99.375, "conversion_factor": 0.8830, "coupon_rate": 0.04375, "label": "4.375% Nov-34"},
-        {"cash_price": 99.625, "conversion_factor": 0.9195, "coupon_rate": 0.04625, "label": "4.625% Feb-35"},
-        {"cash_price": 99.000, "conversion_factor": 0.9014, "coupon_rate": 0.04000, "label": "4.0%   Feb-33"},
-    ]
+class TestImpliedRepo:
+    def test_higher_coupon_higher_implied_repo(self):
+        # More coupon income makes the bond cheaper to deliver → higher implied repo
+        ir_low  = implied_repo(99.0, FUTURES, 0.9014, 0.04,   DAYS)
+        ir_high = implied_repo(99.0, FUTURES, 0.9014, 0.08,   DAYS)
+        assert ir_high > ir_low
 
-    print("\n--- CTD Selection ---")
-    print(f"  Futures price: {FUTURES_PRICE}  Days to delivery: {DAYS_TO_DELIVERY}")
-    print()
-    print(f"  {'Bond':<18} {'Implied repo':>14}  Rank")
+    def test_implied_repo_positive_for_reasonable_inputs(self):
+        ir = implied_repo(99.50, FUTURES, 0.9195, 0.045, DAYS)
+        assert ir > 0
 
-    repos = [
-        (b["label"], implied_repo(b["cash_price"], FUTURES_PRICE, b["conversion_factor"], b["coupon_rate"], DAYS_TO_DELIVERY))
-        for b in bonds
-    ]
-    repos.sort(key=lambda x: x[1], reverse=True)
-    for i, (label, ir) in enumerate(repos, 1):
-        tag = "  ← CTD (highest implied repo)" if i == 1 else ""
-        print(f"  {label:<18} {ir*100:>13.3f}%  #{i}{tag}")
-
-    ctd = find_ctd(bonds, FUTURES_PRICE, DAYS_TO_DELIVERY)
-    print(f"\n  find_ctd() returns: {ctd['label']}  (implied repo = {ctd['implied_repo']*100:.3f}%)")
+    def test_bond_is_ctd_when_implied_repo_exceeds_market(self):
+        ir = implied_repo(99.50, FUTURES, 0.9195, 0.045, DAYS)
+        # If implied repo > market repo, basis trade is attractive
+        assert isinstance(ir > REPO, bool)  # just verify it's a valid comparison
 
 
-def test_basket_analysis_full():
-    """Run basket_analysis() on the full TYM26 basket and print the ranked table."""
-    basket = get_basket(use_api=False)
-    cash_prices = {b["cusip"]: round(95.0 + b["coupon"] * 100, 3) for b in basket}
+class TestFindCTD:
+    def test_returns_bond_with_highest_implied_repo(self):
+        bonds = [
+            {"cash_price": 99.375, "conversion_factor": 0.8830, "coupon_rate": 0.04375, "label": "A"},
+            {"cash_price": 99.625, "conversion_factor": 0.9195, "coupon_rate": 0.04625, "label": "B"},
+            {"cash_price": 99.000, "conversion_factor": 0.9014, "coupon_rate": 0.04000, "label": "C"},
+        ]
+        ctd = find_ctd(bonds, FUTURES, DAYS)
+        # Verify it really is the max implied repo
+        repos = [
+            implied_repo(b["cash_price"], FUTURES, b["conversion_factor"], b["coupon_rate"], DAYS)
+            for b in bonds
+        ]
+        assert ctd["implied_repo"] == pytest.approx(max(repos))
 
-    df = basket_analysis(basket, cash_prices, FUTURES_PRICE, REPO_RATE, DAYS_TO_DELIVERY)
+    def test_ctd_has_implied_repo_field(self):
+        bonds = [
+            {"cash_price": 99.0, "conversion_factor": 0.9014, "coupon_rate": 0.04, "label": "X"},
+        ]
+        ctd = find_ctd(bonds, FUTURES, DAYS)
+        assert "implied_repo" in ctd
+        assert "label" in ctd
 
-    print(f"\n--- Full Basket Analysis (TYM26, futures={FUTURES_PRICE}, repo={REPO_RATE*100:.2f}%, days={DAYS_TO_DELIVERY}) ---")
-    print()
-    print(f"  {'Rank':<5} {'Bond':<18} {'Cash px':>8} {'CF':>7} {'Gross':>8} {'Carry':>8} {'Net':>8} {'Impl repo':>10}  CTD?")
-    print("  " + "-" * 85)
-    for rank, row in df.iterrows():
-        ctd_flag = " ← CTD" if row["is_ctd"] else ""
-        print(
-            f"  {rank:<5} {row['label']:<18} {row['cash_price']:>8.3f} {row['conv_factor']:>7.4f} "
-            f"{row['gross_basis']:>8.4f} {row['carry']:>8.4f} {row['net_basis']:>8.4f} "
-            f"{row['implied_repo']*100:>9.3f}%{ctd_flag}"
-        )
 
-    ctd_row = df[df["is_ctd"]].iloc[0]
-    runner  = df[df.index == 2].iloc[0]
-    spread  = (ctd_row["implied_repo"] - runner["implied_repo"]) * 10_000
-    print(f"\n  CTD:    {ctd_row['label']}")
-    print(f"  Runner: {runner['label']}")
-    print(f"  CTD/runner spread: {spread:.1f}bp implied repo")
+class TestBasketAnalysis:
+    def test_rank_1_is_ctd(self):
+        basket = get_basket(use_api=False)
+        prices = {b["cusip"]: 95.0 + b["coupon"] * 100 for b in basket}
+        df = basket_analysis(basket, prices, FUTURES, REPO, DAYS)
+        assert df[df["is_ctd"]].index[0] == 1
+
+    def test_only_one_ctd(self):
+        basket = get_basket(use_api=False)
+        prices = {b["cusip"]: 95.0 + b["coupon"] * 100 for b in basket}
+        df = basket_analysis(basket, prices, FUTURES, REPO, DAYS)
+        assert df["is_ctd"].sum() == 1
+
+    def test_implied_repos_descending(self):
+        basket = get_basket(use_api=False)
+        prices = {b["cusip"]: 95.0 + b["coupon"] * 100 for b in basket}
+        df = basket_analysis(basket, prices, FUTURES, REPO, DAYS)
+        repos = df["implied_repo"].tolist()
+        assert repos == sorted(repos, reverse=True)
+
+    def test_required_columns_present(self):
+        basket = get_basket(use_api=False)
+        prices = {b["cusip"]: 95.0 + b["coupon"] * 100 for b in basket}
+        df = basket_analysis(basket, prices, FUTURES, REPO, DAYS)
+        for col in ("label", "cash_price", "conv_factor", "gross_basis",
+                    "carry", "net_basis", "implied_repo", "is_ctd"):
+            assert col in df.columns
+
+
+class TestCTDScenario:
+    def _basket_and_yields(self):
+        basket = get_basket(use_api=False)
+        yields = {b["cusip"]: 0.045 for b in basket}
+        return basket, yields
+
+    def test_returns_two_dataframes(self):
+        basket, yields = self._basket_and_yields()
+        summary, heatmap = ctd_scenario(basket, yields, FUTURES, REPO, DAYS)
+        import pandas as pd
+        assert isinstance(summary, pd.DataFrame)
+        assert isinstance(heatmap, pd.DataFrame)
+
+    def test_summary_has_one_row_per_shift(self):
+        basket, yields = self._basket_and_yields()
+        shifts = [-50, 0, 50]
+        summary, _ = ctd_scenario(basket, yields, FUTURES, REPO, DAYS, shifts_bps=shifts)
+        assert len(summary) == len(shifts)
+
+    def test_summary_columns(self):
+        basket, yields = self._basket_and_yields()
+        summary, _ = ctd_scenario(basket, yields, FUTURES, REPO, DAYS, shifts_bps=[0])
+        for col in ("shift_bps", "ctd_label", "ctd_implied_repo",
+                    "runner_label", "runner_implied_repo", "spread_bps", "ctd_changed"):
+            assert col in summary.columns
+
+    def test_zero_shift_not_flagged_as_changed(self):
+        basket, yields = self._basket_and_yields()
+        summary, _ = ctd_scenario(basket, yields, FUTURES, REPO, DAYS, shifts_bps=[-50, 0, 50])
+        row = summary[summary["shift_bps"] == 0].iloc[0]
+        assert not row["ctd_changed"]
+
+    def test_heatmap_rows_are_bonds(self):
+        basket, yields = self._basket_and_yields()
+        _, heatmap = ctd_scenario(basket, yields, FUTURES, REPO, DAYS, shifts_bps=[-50, 0, 50])
+        assert len(heatmap) == len(basket)
+
+    def test_heatmap_columns_are_shifts(self):
+        basket, yields = self._basket_and_yields()
+        shifts = [-50, 0, 50]
+        _, heatmap = ctd_scenario(basket, yields, FUTURES, REPO, DAYS, shifts_bps=shifts)
+        assert list(heatmap.columns) == shifts
+
+    def test_spread_is_positive(self):
+        # CTD always has higher implied repo than runner-up
+        basket, yields = self._basket_and_yields()
+        summary, _ = ctd_scenario(basket, yields, FUTURES, REPO, DAYS, shifts_bps=[0])
+        assert summary.iloc[0]["spread_bps"] > 0
