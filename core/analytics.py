@@ -14,6 +14,7 @@ from scipy.optimize import brentq
 from pydantic import BaseModel, Field, model_validator
 
 from core.curves import SpotCurve
+from core.pricing import modified_duration as _modified_duration, convexity as _convexity
 
 # ── Z-spread solver constants ─────────────────────────────────────────────────
 _ZS_MIN = -0.05     # −500 bps lower bound  (rare negative spread)
@@ -259,8 +260,8 @@ def total_return_decomposition(
     repo_rate: float,
     holding_period_yrs: float = HOLD_3M,
     yield_change: float = 0.0,
-    modified_duration: float | None = None,
-    convexity: float | None = None,
+    mod_dur: float | None = None,
+    cvx: float | None = None,
 ) -> TotalReturnDecomposition:
     """P&L attribution: carry, roll-down, duration, and convexity components.
 
@@ -270,14 +271,12 @@ def total_return_decomposition(
         repo_rate: Repo financing rate as a decimal.
         holding_period_yrs: Horizon in years.
         yield_change: Parallel yield shift as a decimal (e.g. +0.005 = +50bps).
-        modified_duration: Pre-computed value; computed from YTM if None.
-        convexity: Pre-computed value; computed from YTM if None.
+        mod_dur: Pre-computed modified duration; computed from YTM if None.
+        cvx: Pre-computed convexity; computed from YTM if None.
 
     Returns:
         TotalReturnDecomposition NamedTuple.
     """
-    from core.pricing import modified_duration as _md, convexity as _cvx
-
     rd = roll_down_return(bond, spot_curve, holding_period_yrs)
     price_now = rd.price_now
 
@@ -286,10 +285,10 @@ def total_return_decomposition(
     carry_pct = rd.coupon_accrual_pct - financing_pct
 
     # Duration and convexity — use supplied values or compute from YTM
-    md = modified_duration if modified_duration is not None else _md(
+    md = mod_dur if mod_dur is not None else _modified_duration(
         bond.face_value, bond.coupon_rate, bond.years_to_maturity, bond.ytm, bond.frequency
     )
-    cvx = convexity if convexity is not None else _cvx(
+    cvx = cvx if cvx is not None else _convexity(
         bond.face_value, bond.coupon_rate, bond.years_to_maturity, bond.ytm, bond.frequency
     )
 
