@@ -47,6 +47,16 @@ class TestPriceBond:
         expected = FACE / (1.0 + 0.025) ** 20
         assert abs(p - expected) < 1e-8
 
+    def test_annual_frequency(self):
+        # Annual coupon bond at par when coupon == yield
+        p = price_bond(FACE, COUPON, YEARS, YTM_PAR, frequency=1)
+        assert abs(p - FACE) < 1e-8
+
+    def test_pull_to_par(self):
+        # Par bond stays at par regardless of remaining maturity
+        assert abs(price_bond(FACE, COUPON, 1.0, YTM_PAR) - FACE) < 1e-8
+        assert abs(price_bond(FACE, COUPON, 0.5, YTM_PAR) - FACE) < 1e-8
+
     def test_face_scaling(self):
         # Price should scale linearly with face value
         p1 = price_bond(100, COUPON, YEARS, YTM_PAR)
