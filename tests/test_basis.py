@@ -1,7 +1,9 @@
 """Tests for core.basis — gross basis, carry, net basis, implied repo, CTD."""
 
 import pytest
-from core.basis import gross_basis, carry, net_basis, implied_repo, find_ctd
+import pandas as pd
+from datetime import date
+from core.basis import gross_basis, carry, net_basis, implied_repo, find_ctd, basket_analysis
 
 
 class TestGrossBasis:
@@ -94,3 +96,56 @@ class TestFindCTD:
     def test_empty_bonds_raises(self):
         with pytest.raises(ValueError, match="empty"):
             find_ctd([], 97.00, 90)
+
+
+class TestBasketAnalysis:
+    BASKET = [
+        {"cusip": "AAA", "coupon": 0.04375, "maturity": date(2034, 11, 15), "conv_factor": 0.8830},
+        {"cusip": "BBB", "coupon": 0.04625, "maturity": date(2035,  2, 15), "conv_factor": 0.9195},
+        {"cusip": "CCC", "coupon": 0.04000, "maturity": date(2033,  2, 15), "conv_factor": 0.9014},
+    ]
+    PRICES     = {"AAA": 99.375, "BBB": 99.625, "CCC": 99.000}
+    FUT_PRICE  = 108.50
+    REPO       = 0.053
+    DAYS       = 110
+
+    def _run(self):
+        return basket_analysis(self.BASKET, self.PRICES, self.FUT_PRICE, self.REPO, self.DAYS)
+
+    def test_returns_dataframe(self):
+        assert isinstance(self._run(), pd.DataFrame)
+
+    def test_row_count_matches_priced_bonds(self):
+        assert len(self._run()) == len(self.BASKET)
+
+    def test_ranked_by_implied_repo(self):
+        df = self._run()
+        repos = df["implied_repo"].tolist()
+        assert repos == sorted(repos, reverse=True)
+
+    def test_exactly_one_ctd(self):
+        df = self._run()
+        assert df["is_ctd"].sum() == 1
+
+    def test_ctd_is_rank_1(self):
+        df = self._run()
+        assert df.loc[df["is_ctd"]].index[0] == 1
+
+    def test_net_basis_decomposition(self):
+        """net_basis == gross_basis - carry for every row."""
+        df = self._run()
+        diff = (df["gross_basis"] - df["carry"] - df["net_basis"]).abs()
+        assert (diff < 1e-9).all()
+
+    def test_skips_bonds_with_no_price(self):
+        prices = {"AAA": 99.375}   # only one bond priced
+        df = basket_analysis(self.BASKET, prices, self.FUT_PRICE, self.REPO, self.DAYS)
+        assert len(df) == 1
+
+    def test_empty_basket_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            basket_analysis([], self.PRICES, self.FUT_PRICE, self.REPO, self.DAYS)
+
+    def test_no_prices_raises(self):
+        with pytest.raises(ValueError, match="empty"):
+            basket_analysis(self.BASKET, {}, self.FUT_PRICE, self.REPO, self.DAYS)
