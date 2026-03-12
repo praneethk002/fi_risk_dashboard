@@ -34,8 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 from mcp.server.fastmcp import FastMCP
 
-from core.pricing import price_bond as _price_bond
-from core.risk import modified_duration, dv01, convexity
+from core.pricing import price_bond as _price_bond, modified_duration, dv01, convexity
 from core.scenarios import (
     parallel_shift,
     bear_steepening,

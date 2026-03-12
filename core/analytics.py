@@ -276,7 +276,7 @@ def total_return_decomposition(
     Returns:
         TotalReturnDecomposition NamedTuple.
     """
-    from core.risk import modified_duration as _md, convexity as _cvx
+    from core.pricing import modified_duration as _md, convexity as _cvx
 
     rd = roll_down_return(bond, spot_curve, holding_period_yrs)
     price_now = rd.price_now

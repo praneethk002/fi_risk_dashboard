@@ -21,8 +21,7 @@ import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 
-from core.pricing import price_bond
-from core.risk import modified_duration, dv01, convexity
+from core.pricing import price_bond, modified_duration, dv01, convexity
 from core.scenarios import (
     parallel_shift,
     bear_steepening,
