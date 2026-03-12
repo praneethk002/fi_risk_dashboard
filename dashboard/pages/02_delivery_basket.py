@@ -15,18 +15,14 @@ import plotly.graph_objects as go
 
 from dashboard.shared import (
     CONTRACT, C_BLUE, C_GREEN, C_RED, C_AMBER,
-    PLOTLY_BASE, inject_css, mc, sh, banner, sidebar_inputs, fresh_basket,
+    PLOTLY_BASE, inject_css, mc, sh, banner, sidebar_inputs, fresh_basket, page_header,
 )
 
 st.set_page_config(page_title="Delivery Basket", page_icon="📋", layout="wide")
 inject_css()
 params = sidebar_inputs()
-
-st.markdown(
-    '<div style="color:#e6edf3;font-size:1.2rem;font-weight:700;padding:0.4rem 0 0.8rem;">'
-    '02 · Delivery Basket</div>',
-    unsafe_allow_html=True,
-)
+page_header("02 · Delivery Basket", "Delivery Basket",
+            "Full analytics table — gross basis, carry, net basis, CF — and CTD transition risk gauge")
 
 ranked = fresh_basket(
     params["futures_price"], params["repo_rate"],

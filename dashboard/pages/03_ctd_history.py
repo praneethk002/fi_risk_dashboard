@@ -17,18 +17,14 @@ import pandas as pd
 
 from dashboard.shared import (
     CONTRACT, C_BLUE, C_GREEN, C_RED, C_AMBER, C_PURPLE,
-    PLOTLY_BASE, inject_css, mc, sh, banner, sidebar_inputs, get_db,
+    PLOTLY_BASE, inject_css, mc, sh, banner, sidebar_inputs, get_db, page_header,
 )
 
 st.set_page_config(page_title="CTD History", page_icon="📅", layout="wide")
 inject_css()
 params = sidebar_inputs()
-
-st.markdown(
-    '<div style="color:#e6edf3;font-size:1.2rem;font-weight:700;padding:0.4rem 0 0.8rem;">'
-    '03 · CTD History</div>',
-    unsafe_allow_html=True,
-)
+page_header("03 · CTD History", "CTD History",
+            "CTD identity timeline, implied repo spread proximity, and transition log")
 
 db = get_db()
 

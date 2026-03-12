@@ -19,18 +19,14 @@ import pandas as pd
 
 from dashboard.shared import (
     CONTRACT, C_BLUE, C_GREEN, C_RED, C_AMBER,
-    PLOTLY_BASE, inject_css, mc, sh, banner, sidebar_inputs,
+    PLOTLY_BASE, inject_css, mc, sh, banner, sidebar_inputs, page_header,
 )
 
 st.set_page_config(page_title="Scenario Grid", page_icon="🔢", layout="wide")
 inject_css()
 params = sidebar_inputs()
-
-st.markdown(
-    '<div style="color:#e6edf3;font-size:1.2rem;font-weight:700;padding:0.4rem 0 0.8rem;">'
-    '04 · Scenario Grid</div>',
-    unsafe_allow_html=True,
-)
+page_header("04 · Scenario Grid", "Scenario Grid",
+            "Parallel yield-shock heatmap — implied repo × shift, CTD identity at every scenario")
 
 banner(
     "Parallel yield shifts applied to the delivery basket. "

@@ -16,18 +16,14 @@ import plotly.graph_objects as go
 from dashboard.shared import (
     CONTRACT, C_BLUE, C_GREEN, C_RED, C_AMBER, C_PURPLE,
     PLOTLY_BASE, inject_css, mc, sh, banner, sidebar_inputs,
-    get_db, fresh_basket,
+    get_db, fresh_basket, page_header,
 )
 
 st.set_page_config(page_title="Basis Monitor", page_icon="📊", layout="wide")
 inject_css()
 params = sidebar_inputs()
-
-st.markdown(
-    '<div style="color:#e6edf3;font-size:1.2rem;font-weight:700;padding:0.4rem 0 0.8rem;">'
-    '01 · Basis Monitor</div>',
-    unsafe_allow_html=True,
-)
+page_header("01 · Basis Monitor", "Basis Monitor",
+            "Live basket ranked by implied repo + 90-day net basis history")
 
 # ── Data ───────────────────────────────────────────────────────────────────────
 ranked = fresh_basket(
