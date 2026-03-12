@@ -1,7 +1,14 @@
 """Tests for core.scenarios — yield curve shift functions."""
 
 import pytest
-from core.scenarios import parallel_shift, bear_steepening, bear_flattening, custom_shift
+from core.scenarios import (
+    bear_flattening,
+    bear_steepening,
+    bull_flattening,
+    bull_steepening,
+    custom_shift,
+    parallel_shift,
+)
 
 CURVE = {
     "3M": 0.040,
@@ -75,6 +82,48 @@ class TestBearFlattening:
         increments = [s - o for s, o in zip(shifted_rates, original_rates)]
         for i in range(len(increments) - 1):
             assert increments[i] >= increments[i + 1]
+
+
+class TestBullSteepening:
+    def test_short_end_receives_full_drop(self):
+        """First maturity drops by shift_bps in bull steepening."""
+        shifted = bull_steepening(CURVE, 100)
+        first = list(CURVE.keys())[0]
+        assert abs(shifted[first] - (CURVE[first] - 0.01)) < 1e-10
+
+    def test_long_end_unchanged(self):
+        """Last maturity is unchanged in bull steepening."""
+        shifted = bull_steepening(CURVE, 100)
+        last = list(CURVE.keys())[-1]
+        assert abs(shifted[last] - CURVE[last]) < 1e-10
+
+    def test_monotonically_decreasing_drops(self):
+        """Short-end drops the most; drops taper off toward the long end."""
+        shifted = bull_steepening(CURVE, 100)
+        drops = [CURVE[k] - shifted[k] for k in CURVE]
+        for i in range(len(drops) - 1):
+            assert drops[i] >= drops[i + 1] - 1e-10
+
+
+class TestBullFlattening:
+    def test_short_end_unchanged(self):
+        """First maturity is unchanged in bull flattening."""
+        shifted = bull_flattening(CURVE, 100)
+        first = list(CURVE.keys())[0]
+        assert abs(shifted[first] - CURVE[first]) < 1e-10
+
+    def test_long_end_receives_full_drop(self):
+        """Last maturity drops by shift_bps in bull flattening."""
+        shifted = bull_flattening(CURVE, 100)
+        last = list(CURVE.keys())[-1]
+        assert abs(shifted[last] - (CURVE[last] - 0.01)) < 1e-10
+
+    def test_monotonically_increasing_drops(self):
+        """Long-end drops the most; drops increase moving out the curve."""
+        shifted = bull_flattening(CURVE, 100)
+        drops = [CURVE[k] - shifted[k] for k in CURVE]
+        for i in range(len(drops) - 1):
+            assert drops[i] <= drops[i + 1] + 1e-10
 
 
 class TestCustomShift:

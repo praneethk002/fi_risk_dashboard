@@ -274,5 +274,5 @@ class TestCurveSpreads:
         """Verify output is in bps (not decimals)."""
         c = {"2Y": 0.040, "5Y": 0.045, "10Y": 0.050, "30Y": 0.055}
         result = curve_spreads(c)
-        # 2s10s = 50bps for this curve
+        # 2s10s = 10Y − 2Y = 5.0% − 4.0% = 100bps
         assert abs(result["2s10s_bps"] - 100.0) < 1e-6
