@@ -245,3 +245,106 @@ def basket_analysis(
     df.index.name = "rank"
     df["is_ctd"] = df.index == 1
     return df
+
+
+def ctd_scenario(
+    basket: list[dict],
+    base_yields: dict[str, float],
+    futures_price: float,
+    repo_rate: float,
+    days_to_delivery: int,
+    shifts_bps: list[int] | None = None,
+    as_of: "date | None" = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Show how the CTD and implied repos change as yields are shifted.
+
+    For each yield shift, every bond in the basket is repriced at
+    (base_yield + shift), then basket_analysis() is rerun. This reveals
+    at what yield level the CTD switches to a different bond.
+
+    Args:
+        basket:           List of bond dicts from core.basket.get_basket().
+        base_yields:      Dict mapping cusip → current yield (decimal).
+        futures_price:    Quoted futures price (% of par).
+        repo_rate:        Financing rate as a decimal.
+        days_to_delivery: Calendar days to futures delivery date.
+        shifts_bps:       List of yield shifts in basis points to test.
+                          Defaults to [-100, -75, -50, -25, 0, 25, 50, 75, 100].
+        as_of:            Date to measure years-to-maturity from.
+                          Defaults to today.
+
+    Returns:
+        summary_df: One row per shift. Columns: shift_bps, ctd_label,
+                    ctd_implied_repo, runner_label, runner_implied_repo,
+                    spread_bps, ctd_changed.
+        heatmap_df: Pivot table of implied_repo (rows=bond label,
+                    columns=shift_bps). Useful for plotting.
+    """
+    from datetime import date
+    from core.pricing import price_bond
+
+    if shifts_bps is None:
+        shifts_bps = [-100, -75, -50, -25, 0, 25, 50, 75, 100]
+
+    if as_of is None:
+        as_of = date.today()
+
+    # Pre-compute years to maturity for each bond (fixed across shifts)
+    years_left = {
+        b["cusip"]: (b["maturity"] - as_of).days / 365.25
+        for b in basket
+    }
+
+    # Find the CTD at zero shift — used to detect switches
+    base_prices = {
+        b["cusip"]: price_bond(100.0, b["coupon"], years_left[b["cusip"]], base_yields[b["cusip"]])
+        for b in basket
+        if b["cusip"] in base_yields
+    }
+    base_ctd = basket_analysis(basket, base_prices, futures_price, repo_rate, days_to_delivery)
+    base_ctd_label = base_ctd[base_ctd["is_ctd"]]["label"].iloc[0]
+
+    summary_rows = []
+    heatmap_rows = {}   # label → {shift: implied_repo}
+
+    for shift in shifts_bps:
+        # Reprice every bond at shifted yield
+        shifted_prices = {
+            b["cusip"]: price_bond(
+                100.0,
+                b["coupon"],
+                years_left[b["cusip"]],
+                base_yields[b["cusip"]] + shift / 10_000,
+            )
+            for b in basket
+            if b["cusip"] in base_yields
+        }
+
+        df = basket_analysis(basket, shifted_prices, futures_price, repo_rate, days_to_delivery)
+
+        ctd    = df[df["is_ctd"]].iloc[0]
+        runner = df[df.index == 2].iloc[0]
+        spread = (ctd["implied_repo"] - runner["implied_repo"]) * 10_000
+
+        summary_rows.append({
+            "shift_bps":          shift,
+            "ctd_label":          ctd["label"],
+            "ctd_implied_repo":   ctd["implied_repo"],
+            "runner_label":       runner["label"],
+            "runner_implied_repo":runner["implied_repo"],
+            "spread_bps":         spread,
+            "ctd_changed":        ctd["label"] != base_ctd_label,
+        })
+
+        # Collect implied repos for heatmap
+        for _, row in df.iterrows():
+            label = row["label"]
+            if label not in heatmap_rows:
+                heatmap_rows[label] = {}
+            heatmap_rows[label][shift] = row["implied_repo"] * 100  # as %
+
+    summary_df = pd.DataFrame(summary_rows)
+    heatmap_df = pd.DataFrame(heatmap_rows).T.rename_axis("bond")
+    heatmap_df = heatmap_df[sorted(heatmap_df.columns)]  # shifts in order
+
+    return summary_df, heatmap_df
