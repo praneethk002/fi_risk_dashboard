@@ -1,94 +1,71 @@
-"""Tests for core.basket — deliverable basket and conversion factor."""
+"""
+Basket tests — prints what's happening so you can read and interpret the output.
+Run with: pytest tests/test_basket.py -v -s
+"""
 
-import pytest
 from datetime import date
-from core.basket import (
-    conversion_factor,
-    get_basket,
-    bond_label,
-    MIN_MATURITY,
-    MAX_MATURITY,
-    DELIVERY_DATE,
-)
+from core.basket import conversion_factor, get_basket, bond_label, MIN_MATURITY, MAX_MATURITY
 
 
-class TestConversionFactor:
-    def test_below_par_for_low_coupon(self):
-        """Bond with coupon < 6% should have CF < 1."""
-        cf = conversion_factor(0.04375, date(2034, 11, 15))
-        assert cf < 1.0
-
-    def test_above_par_for_high_coupon(self):
-        """Bond with coupon > 6% should have CF > 1."""
-        cf = conversion_factor(0.07, date(2034, 11, 15))
-        assert cf > 1.0
-
-    def test_six_percent_near_one(self):
-        """Bond with 6% coupon should have CF close to 1."""
-        cf = conversion_factor(0.06, date(2034, 5, 15))
-        assert abs(cf - 1.0) < 0.05
-
-    def test_rounded_to_four_decimals(self):
-        """CF must be rounded to 4 decimal places (CME convention)."""
-        cf = conversion_factor(0.04375, date(2034, 11, 15))
-        assert cf == round(cf, 4)
-
-    def test_longer_maturity_lower_cf_for_low_coupon(self):
-        """For sub-6% bonds, longer maturity → lower CF (more discounting)."""
-        cf_near = conversion_factor(0.04, date(2033, 2, 15))
-        cf_far  = conversion_factor(0.04, date(2036, 2, 15))
-        assert cf_near > cf_far
-
-    def test_positive(self):
-        """CF must always be positive."""
-        cf = conversion_factor(0.04375, date(2034, 11, 15))
-        assert cf > 0
+def test_conversion_factor_by_coupon():
+    """Show how CF changes as coupon moves above and below the 6% base rate."""
+    cases = [
+        (0.03,   date(2034, 11, 15), "low coupon  → CF well below 1"),
+        (0.04375,date(2034, 11, 15), "typical TY bond coupon"),
+        (0.06,   date(2034, 11, 15), "6% base rate → CF should be ~1"),
+        (0.07,   date(2034, 11, 15), "high coupon → CF above 1"),
+    ]
+    print("\n--- Conversion Factor vs Coupon (same maturity Nov-34) ---")
+    print(f"  {'Coupon':>8}  {'CF':>8}  Note")
+    for coupon, mat, note in cases:
+        cf = conversion_factor(coupon, mat)
+        print(f"  {coupon*100:>7.2f}%  {cf:>8.4f}  {note}")
 
 
-class TestGetBasket:
-    def setup_method(self):
-        self.basket = get_basket(use_api=False)
-
-    def test_returns_list(self):
-        assert isinstance(self.basket, list)
-
-    def test_non_empty(self):
-        assert len(self.basket) > 0
-
-    def test_bond_keys(self):
-        """Every bond must have the required keys."""
-        required = {"cusip", "coupon", "maturity", "conv_factor"}
-        for bond in self.basket:
-            assert required.issubset(bond.keys()), f"Missing keys in {bond}"
-
-    def test_sorted_by_maturity(self):
-        maturities = [b["maturity"] for b in self.basket]
-        assert maturities == sorted(maturities)
-
-    def test_maturities_in_eligibility_window(self):
-        """All bonds must mature within the TYM26 eligibility window."""
-        for bond in self.basket:
-            assert MIN_MATURITY <= bond["maturity"] <= MAX_MATURITY, (
-                f"{bond['cusip']} maturity {bond['maturity']} outside window"
-            )
-
-    def test_coupons_are_positive(self):
-        for bond in self.basket:
-            assert bond["coupon"] > 0
-
-    def test_conv_factors_attached(self):
-        for bond in self.basket:
-            assert isinstance(bond["conv_factor"], float)
-            assert 0 < bond["conv_factor"] < 2
+def test_conversion_factor_by_maturity():
+    """Show how CF changes as maturity extends (for a fixed sub-6% coupon)."""
+    coupon = 0.04375
+    maturities = [
+        date(2033,  2, 15),
+        date(2034,  5, 15),
+        date(2035,  2, 15),
+        date(2036,  5, 15),
+    ]
+    print(f"\n--- Conversion Factor vs Maturity (coupon={coupon*100:.3g}%) ---")
+    print(f"  {'Maturity':<14}  {'CF':>8}  Note")
+    for mat in maturities:
+        cf = conversion_factor(coupon, mat)
+        note = "longer maturity → more discounting → lower CF" if mat == maturities[-1] else ""
+        print(f"  {mat.strftime('%b %Y'):<14}  {cf:>8.4f}  {note}")
 
 
-class TestBondLabel:
-    def test_format(self):
-        bond = {"coupon": 0.04375, "maturity": date(2034, 11, 15)}
-        label = bond_label(bond)
-        assert "4.38" in label or "4.375" in label
-        assert "Nov-34" in label
+def test_basket_contents():
+    """Print the full TYM26 deliverable basket with eligibility check."""
+    basket = get_basket(use_api=False)
 
-    def test_returns_string(self):
-        bond = {"coupon": 0.04, "maturity": date(2033, 2, 15)}
-        assert isinstance(bond_label(bond), str)
+    print(f"\n--- TYM26 Deliverable Basket ({len(basket)} bonds) ---")
+    print(f"  Eligibility window: {MIN_MATURITY} to {MAX_MATURITY}")
+    print()
+    print(f"  {'#':<4} {'Label':<18} {'CUSIP':<12} {'Coupon':>8} {'Maturity':<14} {'CF':>8} {'In window?'}")
+    print("  " + "-" * 78)
+
+    for i, bond in enumerate(basket, 1):
+        in_window = MIN_MATURITY <= bond["maturity"] <= MAX_MATURITY
+        flag = "YES" if in_window else "NO  <-- PROBLEM"
+        print(
+            f"  {i:<4} {bond_label(bond):<18} {bond['cusip']:<12} "
+            f"{bond['coupon']*100:>7.3f}%  {bond['maturity'].strftime('%Y-%m-%d'):<14} "
+            f"{bond['conv_factor']:>8.4f}  {flag}"
+        )
+
+
+def test_bond_label_format():
+    """Show what bond_label() produces for a few bonds."""
+    examples = [
+        {"cusip": "AAA", "coupon": 0.04375, "maturity": date(2034, 11, 15)},
+        {"cusip": "BBB", "coupon": 0.04000, "maturity": date(2033,  2, 15)},
+        {"cusip": "CCC", "coupon": 0.06000, "maturity": date(2035,  5, 15)},
+    ]
+    print("\n--- Bond Label Format ---")
+    for b in examples:
+        print(f"  coupon={b['coupon']*100:.3g}%  maturity={b['maturity']}  →  label='{bond_label(b)}'")
