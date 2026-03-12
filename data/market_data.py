@@ -114,7 +114,10 @@ def get_bond_prices(
     prices: dict[str, float] = {}
 
     if use_fred:
-        curve = get_yield_curve(as_of=as_of)
+        try:
+            curve = get_yield_curve(as_of=as_of)
+        except Exception:
+            curve = {}
         if curve:
             for bond in basket:
                 cusip = bond["cusip"]
