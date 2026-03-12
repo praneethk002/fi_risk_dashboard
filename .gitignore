@@ -33,3 +33,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# SQLite database (created by data/ingest.py)
+*.db
