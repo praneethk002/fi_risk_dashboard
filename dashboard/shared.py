@@ -176,6 +176,11 @@ html, body, [class*="css"] {
     line-height: 1.05;
     letter-spacing: -0.02em;
 }
+/* Bond names, labels — use Inter, not monospace */
+.kpi-val-text {
+    font-family: "Inter", -apple-system, sans-serif !important;
+    letter-spacing: -0.03em !important;
+}
 .kpi-sub {
     font-size: 0.64rem;
     color: #374151;
@@ -272,7 +277,12 @@ html, body, [class*="css"] {
     text-align: right;
     transition: background 0.12s;
 }
-.fi-table td:first-child { text-align: left; color: #6e7681; }
+.fi-table td:first-child {
+    text-align: left;
+    color: #6e7681;
+    font-family: "Inter", -apple-system, sans-serif;
+    letter-spacing: 0;
+}
 .fi-table tr:hover td { background: #0d1425; }
 .ctd-row td {
     color: #58a6ff !important;
@@ -281,9 +291,8 @@ html, body, [class*="css"] {
 }
 .ctd-row td:first-child { color: #79c0ff !important; }
 
-/* ── IR bar ── */
-.ir-bar-wrap { display: flex; align-items: center; gap: 7px; justify-content: flex-end; }
-.ir-bar-track { width: 72px; height: 3px; background: #111827; border-radius: 2px; overflow: hidden; }
+/* ── IR bar (inline below value in same cell) ── */
+.ir-bar-track { width: 72px; height: 4px; background: #1a2236; border-radius: 2px; overflow: hidden; margin-top: 5px; }
 .ir-bar-fill  { height: 100%; border-radius: 2px; background: linear-gradient(90deg, #1e3a5f, #58a6ff); }
 
 /* ── Nav cards ── */

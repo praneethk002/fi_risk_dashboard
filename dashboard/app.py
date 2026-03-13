@@ -102,7 +102,7 @@ st.markdown(f"""
   <div class="kpi-card">
     <div class="kpi-accent" style="--accent:linear-gradient(90deg,transparent,#58a6ff 50%,transparent)"></div>
     <div class="kpi-lbl">CTD Bond</div>
-    <div class="kpi-val">{ctd["label"]}</div>
+    <div class="kpi-val kpi-val-text">{ctd["label"]}</div>
     <div class="kpi-sub">
       rank&nbsp;1&nbsp;of&nbsp;{len(ranked)}
       &nbsp;<span class="pill pill-blue">CTD</span>
@@ -152,11 +152,9 @@ for _, row in ranked.iterrows():
     rows_html += (
         f'<tr{row_cls}>'
         f'<td>{row["label"]}{ctd_tag}</td>'
-        f'<td style="color:{ir_col};">{row["implied_repo"]*100:.3f}%</td>'
-        f'<td>'
-        f'<div class="ir-bar-wrap">'
+        f'<td style="color:{ir_col};">'
+        f'{row["implied_repo"]*100:.3f}%'
         f'<div class="ir-bar-track"><div class="ir-bar-fill" style="width:{bar_pct:.0f}%"></div></div>'
-        f'</div>'
         f'</td>'
         f'<td><span class="{nb_cls}">{row["net_basis"]:.4f}</span></td>'
         f'<td>{row["gross_basis"]:.4f}</td>'
@@ -170,7 +168,6 @@ st.markdown(
     '<tr>'
     '<th style="text-align:left;">Bond</th>'
     '<th>Implied Repo</th>'
-    '<th style="text-align:right;padding-right:calc(0.9rem + 79px);">Rel.</th>'
     '<th>Net Basis</th>'
     '<th>Gross Basis</th>'
     '<th>Conv. Factor</th>'
