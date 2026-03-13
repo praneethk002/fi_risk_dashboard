@@ -176,7 +176,7 @@ html, body, [class*="css"] {
     line-height: 1.05;
     letter-spacing: -0.02em;
 }
-/* Bond names, labels — use Inter, not monospace */
+/* Bond names are labels, not numbers — use Inter */
 .kpi-val-text {
     font-family: "Inter", -apple-system, sans-serif !important;
     letter-spacing: -0.03em !important;
@@ -291,7 +291,7 @@ html, body, [class*="css"] {
 }
 .ctd-row td:first-child { color: #79c0ff !important; }
 
-/* ── IR bar (inline below value in same cell) ── */
+/* ── IR bar (inline in IR cell) ── */
 .ir-bar-track { width: 72px; height: 4px; background: #1a2236; border-radius: 2px; overflow: hidden; margin-top: 5px; }
 .ir-bar-fill  { height: 100%; border-radius: 2px; background: linear-gradient(90deg, #1e3a5f, #58a6ff); }
 
