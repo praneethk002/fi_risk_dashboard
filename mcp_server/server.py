@@ -1,6 +1,6 @@
 """CTD Basis Monitor — MCP Server
 
-Exposes six basis-desk tools so that Claude can synthesize a structured
+Exposes eight basis-desk tools so that Claude can synthesize a structured
 morning brief from the historical basis database.
 
 The genuine value here is not computation — that lives in core/ and data/.
@@ -8,14 +8,19 @@ It is synthesis: Claude reads the database via these tools and translates
 quantitative signals (percentile rank, CTD transition proximity, scenario
 output) into a narrative that would take a junior analyst 20 minutes to write.
 
+Capula Investment Management is described as "the largest player in futures
+basis trades."  These tools are built for exactly that morning workflow.
+
 Available tools
 ---------------
-get_current_basket      Full delivery basket with implied repos, CTD flagged
-get_basis_history       90-day net basis time-series for a specific bond
-get_basis_percentile    Where today's CTD net basis sits in its 90-day range
-get_ctd_transitions     Log of CTD switches + implied repo spread at switch
-get_transition_proximity Current implied repo spread — CTD vs runner-up
-run_scenario_grid       Basket re-ranking under parallel yield shifts
+get_current_basket          Full delivery basket with implied repos, CTD flagged
+get_basis_history           90-day net basis time-series for a specific bond
+get_basis_percentile        Where today's CTD net basis sits in its 90-day range
+get_ctd_transitions         Log of CTD switches + implied repo spread at switch
+get_transition_proximity    Current implied repo spread with risk flag + trend
+run_scenario_grid           Basket re-ranking under parallel yield shifts (FRED yields)
+get_ctd_transition_threshold Futures price at which CTD identity would switch
+get_carry_roll              Carry and roll-down for a bond over 3M/6M horizons
 
 Run
 ---
@@ -33,13 +38,55 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mcp.server.fastmcp import FastMCP
 
 from data.db import BasisDB
-from core.basket import get_basket, bond_label
+from core.basket import get_basket, bond_label, DELIVERY_DATE
 from core.scenario import scenario_grid as _scenario_grid
+from core.ctd import ctd_transition_threshold as _ctd_threshold
+from core.carry import carry as _carry
+from core.pricing import price_bond as _price_bond
+from data.fred_client import get_yield_curve as _get_fred_curve
+from mcp_server import db_client
 
 _db = BasisDB()
 _db.init_schema()
 
 mcp = FastMCP("ctd-basis-monitor")
+
+# ---------------------------------------------------------------------------
+# Shared helpers for new tools
+# ---------------------------------------------------------------------------
+
+_MATURITY_MAP: dict[str, float] = {
+    "3M": 0.25, "2Y": 2.0, "5Y": 5.0, "7Y": 7.0, "10Y": 10.0, "30Y": 30.0,
+}
+
+
+def _try_get_fred_curve() -> dict[str, float]:
+    """Fetch FRED yield curve, returning empty dict on any network failure."""
+    try:
+        return _get_fred_curve()
+    except Exception:
+        return {}
+
+
+def _interp_yield(years: float, curve: dict[str, float]) -> float:
+    """Linearly interpolate / flat-extrapolate the FRED curve to any maturity."""
+    pts = sorted(
+        [(m, curve[k]) for k, m in _MATURITY_MAP.items() if k in curve],
+        key=lambda x: x[0],
+    )
+    if not pts:
+        return 0.045                     # safe fallback
+    if years <= pts[0][0]:
+        return pts[0][1]
+    if years >= pts[-1][0]:
+        return pts[-1][1]
+    for i in range(len(pts) - 1):
+        m0, r0 = pts[i]
+        m1, r1 = pts[i + 1]
+        if m0 <= years <= m1:
+            t = (years - m0) / (m1 - m0)
+            return r0 + t * (r1 - r0)
+    return pts[-1][1]
 
 
 # ── Tool 1: Current basket snapshot ────────────────────────────────────────
@@ -212,109 +259,120 @@ def get_ctd_transitions(contract: str = "TYM26") -> list[dict]:
 
 @mcp.tool()
 def get_transition_proximity(contract: str = "TYM26") -> dict:
-    """Current implied repo spread between the CTD and the runner-up.
+    """Implied repo spread between CTD and runner-up, with risk flag and trend.
 
-    A narrowing spread signals elevated CTD transition risk. Below 25bps
-    is noteworthy; below 10bps warrants close monitoring.
+    A narrowing spread signals elevated CTD transition risk.
+    Risk flags: LOW (>15bps) | ELEVATED (5–15bps) | CRITICAL (<5bps).
+    Trend compares today's spread to 5 days ago: NARROWING | WIDENING | STABLE.
 
     Args:
         contract: Futures contract identifier (e.g. "TYM26").
 
     Returns:
-        {snapshot_dt, ctd_label, runner_label,
-         ctd_implied_repo_pct, runner_implied_repo_pct,
-         spread_bps, risk_level: "low"|"elevated"|"high"}
-        or {"error": "..."} if insufficient data.
+        {contract, ctd_cusip, runner_up_cusip, current_spread_bps,
+         spread_5d/10d/20d_ago_bps, trend, risk_flag, risk_description,
+         recent_snapshots[]}
+        or {"error": "..."} if no data.
     """
-    df = _db.get_transition_proximity(contract)
-    if df.empty:
-        return {"error": "Proximity data requires at least 2 bonds per snapshot."}
+    result = db_client.query_ctd_proximity(contract)
+    if isinstance(result, str):
+        return {"error": result}
 
-    latest = df.iloc[-1]
-    spread = float(latest.get("spread_to_second_bps", 0) or 0)
-
-    if spread < 10:
-        risk = "high"
-    elif spread < 25:
-        risk = "elevated"
-    else:
-        risk = "low"
-
-    basket = get_basket(use_api=False)
+    # Enrich with human-readable labels
+    basket    = get_basket(use_api=False)
     label_map = {b["cusip"]: bond_label(b) for b in basket}
-
-    # Get CTD and runner-up from current basket
-    current = _db.get_current_basket(contract)
-    ctd_label    = "—"
-    runner_label = "—"
-    ctd_ir       = None
-    runner_ir    = None
-    if not current.empty:
-        ctd_rows = current[current["is_ctd"] == 1]
-        if not ctd_rows.empty:
-            ctd_cusip = ctd_rows.iloc[0]["cusip"]
-            ctd_label = label_map.get(ctd_cusip, ctd_cusip)
-            ctd_ir    = round(float(ctd_rows.iloc[0]["implied_repo"]) * 100, 4)
-        non_ctd = current[current["is_ctd"] != 1]
-        if not non_ctd.empty:
-            runner_cusip = non_ctd.iloc[0]["cusip"]
-            runner_label = label_map.get(runner_cusip, runner_cusip)
-            runner_ir    = round(float(non_ctd.iloc[0]["implied_repo"]) * 100, 4)
-
-    return {
-        "snapshot_dt":            str(latest["snapshot_dt"]),
-        "ctd_label":              ctd_label,
-        "runner_label":           runner_label,
-        "ctd_implied_repo_pct":   ctd_ir,
-        "runner_implied_repo_pct": runner_ir,
-        "spread_bps":             round(spread, 2),
-        "risk_level":             risk,
-    }
+    result["ctd_label"]      = label_map.get(result.get("ctd_cusip", ""), result.get("ctd_cusip", ""))
+    result["runner_up_label"] = label_map.get(result.get("runner_up_cusip", ""), result.get("runner_up_cusip", ""))
+    return result
 
 
 # ── Tool 6: Scenario grid ─────────────────────────────────────────────────────
 
 @mcp.tool()
 def run_scenario_grid(
-    futures_price: float,
-    repo_rate_pct: float,
-    days_to_delivery: int,
-    flat_yield_pct: float = 4.50,
+    contract: str = "TYM26",
     shifts_bps: list[int] | None = None,
-) -> list[dict]:
+) -> dict:
     """Re-rank the delivery basket under a range of parallel yield shifts.
 
-    For each shift, returns the CTD identity, its implied repo, the runner-up,
-    and the spread. The 0bps row is the base case.
+    Reads the current basket snapshot from the database (futures price, repo
+    rate, days to delivery) and uses the live FRED curve — linearly interpolated
+    to each bond's remaining maturity — as the base yield for repricing.
+
+    Yield input: FRED curve interpolated per bond maturity (first-order
+    approximation; a production system would use bond-specific market yields).
+    Futures price is held constant across scenarios — appropriate for a
+    sensitivity grid where relative CTD ranking, not absolute price, is the output.
 
     Args:
-        futures_price:      Quoted TY futures price (% of par).
-        repo_rate_pct:      Repo financing rate as a percentage.
-        days_to_delivery:   Calendar days to the delivery date.
-        flat_yield_pct:     Flat yield used to price the basket (default 4.50).
-        shifts_bps:         Yield shifts to test. Defaults to
-                            [-100, -75, -50, -25, 0, 25, 50, 75, 100].
+        contract:   Futures contract identifier (e.g. "TYM26").
+        shifts_bps: Parallel yield shifts to test (bps).
+                    Defaults to [-100, -75, -50, -25, 0, 25, 50, 75, 100].
 
     Returns:
-        List of dicts per shift: shift_bps, ctd_label, ctd_implied_repo_pct,
+        {contract, base_futures_price, base_ctd_label, scenarios[]}
+        Each scenario has shift_bps, ctd_label, ctd_implied_repo_pct,
         runner_label, runner_implied_repo_pct, spread_bps, ctd_changed.
     """
+    from datetime import date as _date
+
     if shifts_bps is None:
         shifts_bps = [-100, -75, -50, -25, 0, 25, 50, 75, 100]
 
-    basket = get_basket(use_api=False)
-    base_yields = {b["cusip"]: flat_yield_pct / 100 for b in basket}
+    # Pull current snapshot metadata from DB
+    snapshot = db_client.query_basket_snapshot(contract)
+    if isinstance(snapshot, str):
+        return {"error": snapshot}
+    if not snapshot:
+        return {"error": f"No snapshot data for {contract}."}
 
-    summary_df, _ = _scenario_grid(
-        basket,
-        base_yields,
-        futures_price,
-        repo_rate_pct / 100,
-        days_to_delivery,
-        shifts_bps=shifts_bps,
-    )
+    futures_price    = snapshot[0]["futures_price"]
+    repo_rate        = snapshot[0]["repo_rate_pct"] / 100
+    days_to_delivery = snapshot[0]["days_to_delivery"]
 
-    return [
+    if days_to_delivery <= 0:
+        return {
+            "error": "Contract near delivery — scenario results unreliable.",
+            "days_to_delivery": days_to_delivery,
+        }
+
+    # Get live FRED curve for per-bond yield interpolation
+    fred_curve = _try_get_fred_curve()
+    if not fred_curve:
+        return {"error": "FRED data unavailable — cannot run scenario grid."}
+
+    basket    = get_basket(use_api=False)
+    today     = _date.today()
+    db_cusips = {r["cusip"] for r in snapshot}
+    basket_subset = [b for b in basket if b["cusip"] in db_cusips]
+
+    if not basket_subset:
+        return {"error": "No basket bonds match the DB snapshot."}
+
+    # Derive per-bond base yields from FRED curve
+    base_yields: dict[str, float] = {}
+    for bond in basket_subset:
+        years_left = (bond["maturity"] - today).days / 365.25
+        if years_left > 0:
+            base_yields[bond["cusip"]] = _interp_yield(years_left, fred_curve)
+
+    if not base_yields:
+        return {"error": "Could not derive yields from FRED curve."}
+
+    try:
+        summary_df, _ = _scenario_grid(
+            basket_subset,
+            base_yields,
+            futures_price,
+            repo_rate,
+            days_to_delivery,
+            shifts_bps=shifts_bps,
+            as_of=today,
+        )
+    except Exception as e:
+        return {"error": f"Scenario grid failed: {e}"}
+
+    scenarios = [
         {
             "shift_bps":               int(row["shift_bps"]),
             "ctd_label":               row["ctd_label"],
@@ -326,6 +384,218 @@ def run_scenario_grid(
         }
         for _, row in summary_df.iterrows()
     ]
+
+    base_row = next((s for s in scenarios if s["shift_bps"] == 0), scenarios[0])
+    return {
+        "contract":          contract,
+        "base_futures_price": futures_price,
+        "base_ctd_label":    base_row["ctd_label"],
+        "note": (
+            "Yields derived from FRED curve interpolated per bond maturity. "
+            "Futures price held constant across scenarios (first-order approximation)."
+        ),
+        "scenarios": scenarios,
+    }
+
+
+# ── Tool 7: CTD transition threshold ─────────────────────────────────────────
+
+@mcp.tool()
+def get_ctd_transition_threshold(contract: str = "TYM26") -> dict:
+    """Futures price at which the CTD identity would switch to the runner-up.
+
+    Derived analytically from the cost-of-carry no-arbitrage equation by
+    setting implied_repo_CTD(F*) = implied_repo_runner_up(F*) and solving
+    for F* in closed form (see core.ctd.ctd_transition_threshold docstring).
+
+    This is the most operationally important signal on a basis desk: it tells
+    the short how far the futures price must move before the cheapest bond to
+    deliver changes — affecting the hedge ratio and the delivery option value.
+
+    Args:
+        contract: Futures contract identifier (e.g. "TYM26").
+
+    Returns:
+        {contract, current_futures_price, ctd_label, runner_up_label,
+         transition_threshold_futures_price, distance_to_threshold_pts,
+         ctd_implied_repo_pct, runner_up_implied_repo_pct, spread_bps}
+        or {"error": "..."} if insufficient data.
+    """
+    snapshot = db_client.query_basket_snapshot(contract)
+    if isinstance(snapshot, str):
+        return {"error": snapshot}
+    if len(snapshot) < 2:
+        return {"error": "Need at least 2 bonds to compute transition threshold."}
+
+    ctd    = snapshot[0]
+    runner = snapshot[1]
+
+    basket    = get_basket(use_api=False)
+    label_map = {b["cusip"]: bond_label(b) for b in basket}
+
+    try:
+        threshold = _ctd_threshold(
+            price_a=ctd["cash_price"],
+            price_b=runner["cash_price"],
+            cf_a=ctd["conv_factor"],
+            cf_b=runner["conv_factor"],
+            coupon_a=ctd["coupon_pct"] / 100,
+            coupon_b=runner["coupon_pct"] / 100,
+            days_to_delivery=ctd["days_to_delivery"],
+        )
+    except ZeroDivisionError:
+        return {
+            "error": (
+                "Bonds have identical implied-repo slope (CF_A/P_A ≈ CF_B/P_B); "
+                "no unique transition price exists."
+            )
+        }
+
+    current_f   = ctd["futures_price"]
+    distance    = round(threshold - current_f, 4)
+    spread_bps  = round(
+        (ctd["implied_repo_pct"] - runner["implied_repo_pct"]) * 100, 2
+    )
+
+    return {
+        "contract":                          contract,
+        "snapshot_dt":                       ctd["snapshot_dt"],
+        "current_futures_price":             round(current_f, 4),
+        "ctd_label":                         label_map.get(ctd["cusip"],    ctd["cusip"]),
+        "runner_up_label":                   label_map.get(runner["cusip"], runner["cusip"]),
+        "ctd_implied_repo_pct":              ctd["implied_repo_pct"],
+        "runner_up_implied_repo_pct":        runner["implied_repo_pct"],
+        "spread_bps":                        spread_bps,
+        "transition_threshold_futures_price": round(threshold, 4),
+        "distance_to_threshold_pts":         distance,
+        "note": (
+            "threshold = F* at which implied_repo_CTD(F*) = implied_repo_runner_up(F*). "
+            "Derived in closed form from the cost-of-carry no-arbitrage equation. "
+            "Positive distance = futures must rally to trigger switch; "
+            "negative distance = switch occurs only on a futures decline of that magnitude."
+        ),
+    }
+
+
+# ── Tool 8: Carry and roll-down ───────────────────────────────────────────────
+
+@mcp.tool()
+def get_carry_roll(
+    cusip: str,
+    contract: str = "TYM26",
+    repo_rate_pct: float | None = None,
+) -> dict:
+    """Carry and roll-down for a specific bond over 3M and 6M horizons.
+
+    Carry = coupon accrual (ACT/365) minus repo financing cost (ACT/360).
+    Roll-down = price appreciation as the bond rolls down the FRED yield
+    curve over the holding period (price_bond at shorter maturity / rolled
+    yield minus current price, as % of par).
+
+    Yield inputs use the FRED curve linearly interpolated to each bond's
+    remaining maturity — a first-order proxy appropriate for daily monitoring.
+
+    Args:
+        cusip:          Bond CUSIP identifier.
+        contract:       Futures contract (e.g. "TYM26").
+        repo_rate_pct:  Repo rate as a percentage (e.g. 5.3).
+                        If None, uses the rate stored in the latest DB snapshot.
+
+    Returns:
+        {cusip, label, contract, coupon_pct, maturity, ytm_pct, repo_rate_pct,
+         repo_source, current_net_basis_pts, current_net_basis_ticks,
+         is_ctd, horizons: {"3M": {...}, "6M": {...}}}
+    """
+    from datetime import date as _date
+
+    snapshot = db_client.query_basket_snapshot(contract)
+    if isinstance(snapshot, str):
+        return {"error": snapshot}
+
+    bond_row = next((r for r in snapshot if r["cusip"] == cusip), None)
+    if bond_row is None:
+        return {"error": f"CUSIP {cusip} not found in latest {contract} snapshot."}
+
+    basket   = get_basket(use_api=False)
+    bond_def = next((b for b in basket if b["cusip"] == cusip), None)
+    if bond_def is None:
+        return {"error": f"CUSIP {cusip} not found in basket definition."}
+
+    today      = _date.today()
+    years_left = (bond_def["maturity"] - today).days / 365.25
+    if years_left <= 0:
+        return {"error": "Bond has matured."}
+
+    # Derive current YTM from FRED curve (linearly interpolated)
+    fred_curve = _try_get_fred_curve()
+    if not fred_curve:
+        return {"error": "FRED data unavailable — cannot compute carry/roll."}
+    ytm = _interp_yield(years_left, fred_curve)
+
+    # Repo rate: use parameter if provided, else DB snapshot value
+    if repo_rate_pct is not None:
+        repo_rate   = repo_rate_pct / 100
+        repo_source = "param"
+    else:
+        repo_rate   = bond_row["repo_rate_pct"] / 100
+        repo_source = "db"
+
+    coupon     = bond_def["coupon"]
+    cash_price = bond_row["cash_price"]
+
+    horizons: dict[str, dict] = {}
+    for label, days_held in [("3M", 91), ("6M", 182)]:
+        hp_years = days_held / 365.0
+        if hp_years >= years_left:
+            continue
+
+        # Carry: coupon accrual (ACT/365) minus repo financing (ACT/360)
+        coupon_accrual_pct = coupon * (days_held / 365.0) * 100
+        financing_cost_pct = repo_rate * (days_held / 360.0) * 100
+        net_carry_pct      = coupon_accrual_pct - financing_cost_pct
+
+        # Roll-down: reprice bond at (years_left − hp) using the rolled-down
+        # FRED yield.  Price change is expressed as % of par (100 face).
+        future_years = years_left - hp_years
+        try:
+            future_ytm    = _interp_yield(future_years, fred_curve)
+            current_price = _price_bond(100.0, coupon, years_left, ytm)
+            future_price  = _price_bond(100.0, coupon, future_years, future_ytm)
+            roll_down_pct = future_price - current_price   # % of par
+        except Exception:
+            future_ytm    = ytm
+            roll_down_pct = 0.0
+
+        horizons[label] = {
+            "coupon_accrual_pct":        round(coupon_accrual_pct, 4),
+            "financing_cost_pct":        round(financing_cost_pct, 4),
+            "net_carry_pct":             round(net_carry_pct, 4),
+            "roll_down_pct":             round(roll_down_pct, 4),
+            "total_carry_roll_pct":      round(net_carry_pct + roll_down_pct, 4),
+            "forward_breakeven_ytm_pct": round(future_ytm * 100, 4),
+        }
+
+    label_map = {b["cusip"]: bond_label(b) for b in basket}
+    return {
+        "cusip":                   cusip,
+        "label":                   label_map.get(cusip, cusip),
+        "contract":                contract,
+        "coupon_pct":              round(coupon * 100, 4),
+        "maturity":                bond_def["maturity"].isoformat(),
+        "years_to_maturity":       round(years_left, 4),
+        "ytm_pct":                 round(ytm * 100, 4),
+        "repo_rate_pct":           round(repo_rate * 100, 4),
+        "repo_source":             repo_source,
+        "current_net_basis_pts":   bond_row["net_basis_pts"],
+        "current_net_basis_ticks": bond_row["net_basis_ticks"],
+        "is_ctd":                  bond_row["is_ctd"],
+        "horizons":                horizons,
+        "note": (
+            "YTM from FRED curve interpolated to bond maturity. "
+            "Coupon accrual: ACT/365. Repo financing: ACT/360. "
+            "Roll-down uses FRED curve interpolation (first-order approx)."
+        ),
+    }
 
 
 if __name__ == "__main__":
