@@ -1,8 +1,0 @@
-README.md
-setup.py
-fi_risk_dashboard.egg-info/PKG-INFO
-fi_risk_dashboard.egg-info/SOURCES.txt
-fi_risk_dashboard.egg-info/dependency_links.txt
-fi_risk_dashboard.egg-info/top_level.txt
-tests/test_price.py
-tests/test_risk.py
