@@ -155,6 +155,141 @@ def ctd_transition_threshold(
     return numerator / denominator
 
 
+def switch_direction(f_star: float, current_futures_price: float) -> str:
+    """Classify the market direction needed to trigger a CTD transition.
+
+    After computing F* via ctd_transition_threshold(), this helper
+    translates the raw number into an actionable signal:
+
+    - ``"RALLY"``        – futures must rise above F* for the switch to occur.
+    - ``"SELLOFF"``      – futures must fall below F* for the switch to occur.
+    - ``"AT_THRESHOLD"`` – current price is already at F* (switch is live).
+
+    The 1e-5 tolerance (roughly 1/32 of a tick on TY) avoids spurious
+    ``"AT_THRESHOLD"`` classifications from floating-point noise.
+
+    Args:
+        f_star:               Transition futures price from ctd_transition_threshold().
+        current_futures_price: Today's quoted futures price.
+
+    Returns:
+        One of ``"RALLY"``, ``"SELLOFF"``, or ``"AT_THRESHOLD"``.
+    """
+    diff = f_star - current_futures_price
+    if abs(diff) < 1e-5:
+        return "AT_THRESHOLD"
+    return "RALLY" if diff > 0 else "SELLOFF"
+
+
+def basket_switch_map(
+    ranked_df: pd.DataFrame,
+    futures_price: float,
+) -> list[dict]:
+    """Transition thresholds for every consecutive pair in the ranked basket.
+
+    For each adjacent pair (rank *i*, rank *i+1*) this function computes
+    the futures price F* at which the lower-ranked bond overtakes the
+    higher-ranked one and classifies the required market move.  The list
+    is sorted by ``|distance_pts|`` ascending so the nearest potential
+    switch appears first.
+
+    This gives a complete *switch map* of the basket — not just the CTD
+    vs. runner-up — which is useful when the second-ranked bond is close
+    to the third, or when monitoring a potential double switch.
+
+    Args:
+        ranked_df:     Output of :func:`rank_basket`, sorted by implied_repo
+                       descending (rank 1 = CTD).  Required columns:
+                       ``cusip``, ``label``, ``cash_price``, ``conv_factor``,
+                       ``coupon``, ``implied_repo``.  If a ``days_to_delivery``
+                       column is present it will be used directly; otherwise
+                       it is estimated from the CTD row via the implied repo
+                       formula inversion.
+        futures_price: Current quoted futures price (% of par).
+
+    Returns:
+        List of dicts, one per consecutive pair, sorted by
+        ``|distance_pts|`` ascending (nearest switch first).  Each dict:
+
+        .. code-block:: python
+
+            {
+                "higher_rank":   int,    # e.g. 1
+                "lower_rank":    int,    # e.g. 2
+                "higher_cusip":  str,
+                "lower_cusip":   str,
+                "higher_label":  str,
+                "lower_label":   str,
+                "higher_ir":     float,  # implied repo at current F (decimal)
+                "lower_ir":      float,
+                "spread_bps":    float,  # (higher_ir - lower_ir) * 10_000
+                "f_star":        float,  # futures price where lower overtakes higher
+                "distance_pts":  float,  # f_star - futures_price (+ = rally needed)
+                "direction":     str,    # "RALLY" | "SELLOFF" | "AT_THRESHOLD"
+            }
+
+    Raises:
+        ValueError: If ``ranked_df`` has fewer than 2 rows.
+        ZeroDivisionError: Propagated from :func:`ctd_transition_threshold`
+                           if any pair has identical implied-repo slopes.
+    """
+    if len(ranked_df) < 2:
+        raise ValueError(
+            "ranked_df must contain at least 2 bonds to compute a switch map."
+        )
+
+    # Recover days_to_delivery from the DataFrame if the column is present
+    # (written by BasisDB.write_snapshot), otherwise estimate it from the
+    # CTD row by inverting the implied repo formula:
+    #   IR = [F·CF + P·c·(d/365) − P] / P · (360/d)
+    #   → d = (F·CF − P) / (P·IR/360 − P·c/365)
+    if "days_to_delivery" in ranked_df.columns:
+        days = int(ranked_df.iloc[0]["days_to_delivery"])
+    else:
+        ctd   = ranked_df.iloc[0]
+        p, cf, c, ir = ctd["cash_price"], ctd["conv_factor"], ctd["coupon"], ctd["implied_repo"]
+        denom = p * ir / 360 - p * c / 365
+        days  = int(round((futures_price * cf - p) / denom)) if abs(denom) > 1e-12 else 90
+
+    rows_list = ranked_df.reset_index().to_dict("records")
+    result: list[dict] = []
+
+    for i in range(len(rows_list) - 1):
+        high = rows_list[i]
+        low  = rows_list[i + 1]
+
+        f_star = ctd_transition_threshold(
+            price_a=high["cash_price"],
+            price_b=low["cash_price"],
+            cf_a=high["conv_factor"],
+            cf_b=low["conv_factor"],
+            coupon_a=high["coupon"],
+            coupon_b=low["coupon"],
+            days_to_delivery=days,
+        )
+
+        distance   = f_star - futures_price
+        spread_bps = (high["implied_repo"] - low["implied_repo"]) * 10_000
+
+        result.append({
+            "higher_rank":  high.get("rank", i + 1),
+            "lower_rank":   low.get("rank", i + 2),
+            "higher_cusip": high["cusip"],
+            "lower_cusip":  low["cusip"],
+            "higher_label": high["label"],
+            "lower_label":  low["label"],
+            "higher_ir":    high["implied_repo"],
+            "lower_ir":     low["implied_repo"],
+            "spread_bps":   round(spread_bps, 2),
+            "f_star":       round(f_star, 4),
+            "distance_pts": round(distance, 4),
+            "direction":    switch_direction(f_star, futures_price),
+        })
+
+    result.sort(key=lambda x: abs(x["distance_pts"]))
+    return result
+
+
 def basis_dv01(
     cash_dv01: float,
     futures_dv01: float,

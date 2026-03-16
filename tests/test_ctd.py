@@ -1,5 +1,6 @@
 """
-Tests for core.ctd: rank_basket(), ctd_transition_threshold(), basis_dv01().
+Tests for core.ctd: rank_basket(), ctd_transition_threshold(), basis_dv01(),
+switch_direction(), basket_switch_map().
 """
 
 from __future__ import annotations
@@ -9,7 +10,13 @@ from datetime import date
 import pytest
 
 from core.carry import implied_repo
-from core.ctd import basis_dv01, ctd_transition_threshold, rank_basket
+from core.ctd import (
+    basis_dv01,
+    basket_switch_map,
+    ctd_transition_threshold,
+    rank_basket,
+    switch_direction,
+)
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -192,3 +199,133 @@ class TestBasisDV01:
         result_low_cf  = basis_dv01(cash_dv01, futures_dv01, cf=0.85)
         result_high_cf = basis_dv01(cash_dv01, futures_dv01, cf=0.95)
         assert result_high_cf > result_low_cf
+
+
+# ---------------------------------------------------------------------------
+# switch_direction()
+# ---------------------------------------------------------------------------
+
+class TestSwitchDirection:
+
+    def test_rally_when_f_star_above_current(self):
+        assert switch_direction(f_star=110.0, current_futures_price=108.5) == "RALLY"
+
+    def test_selloff_when_f_star_below_current(self):
+        assert switch_direction(f_star=107.0, current_futures_price=108.5) == "SELLOFF"
+
+    def test_at_threshold_when_equal(self):
+        assert switch_direction(f_star=108.5, current_futures_price=108.5) == "AT_THRESHOLD"
+
+    def test_at_threshold_within_tolerance(self):
+        # Difference of 5e-6 is below the 1e-5 guard
+        assert switch_direction(f_star=108.500005, current_futures_price=108.5) == "AT_THRESHOLD"
+
+    def test_rally_just_outside_tolerance(self):
+        # Difference of 2e-5 is above the 1e-5 guard
+        assert switch_direction(f_star=108.50002, current_futures_price=108.5) == "RALLY"
+
+    def test_selloff_just_outside_tolerance(self):
+        assert switch_direction(f_star=108.49998, current_futures_price=108.5) == "SELLOFF"
+
+
+# ---------------------------------------------------------------------------
+# basket_switch_map()
+# ---------------------------------------------------------------------------
+
+# Use the same basket/prices fixtures as TestRankBasket but with an explicit
+# days_to_delivery column so basket_switch_map doesn't need to invert IR.
+
+def _ranked_df_with_days():
+    df = rank_basket(_BASKET, FUTURES, _PRICES, REPO, DAYS)
+    df["days_to_delivery"] = DAYS
+    return df
+
+
+class TestBasketSwitchMap:
+
+    def _map(self):
+        return basket_switch_map(_ranked_df_with_days(), FUTURES)
+
+    def test_returns_n_minus_1_entries(self):
+        # 3-bond basket → 2 pairs
+        result = self._map()
+        assert len(result) == 2
+
+    def test_required_keys_present(self):
+        required = {
+            "higher_rank", "lower_rank",
+            "higher_cusip", "lower_cusip",
+            "higher_label", "lower_label",
+            "higher_ir", "lower_ir",
+            "spread_bps", "f_star", "distance_pts", "direction",
+        }
+        for entry in self._map():
+            assert required <= entry.keys()
+
+    def test_sorted_by_abs_distance(self):
+        result = self._map()
+        distances = [abs(e["distance_pts"]) for e in result]
+        assert distances == sorted(distances)
+
+    def test_ranks_are_consecutive(self):
+        result = self._map()
+        for entry in result:
+            assert entry["lower_rank"] == entry["higher_rank"] + 1
+
+    def test_spread_bps_positive(self):
+        # Higher-ranked bond always has the higher implied repo at the current F
+        for entry in self._map():
+            assert entry["spread_bps"] >= 0
+
+    def test_direction_values_valid(self):
+        valid = {"RALLY", "SELLOFF", "AT_THRESHOLD"}
+        for entry in self._map():
+            assert entry["direction"] in valid
+
+    def test_f_star_verified_numerically(self):
+        """At each F* the two adjacent bonds should have equal implied repo."""
+        df = _ranked_df_with_days()
+        result = basket_switch_map(df, FUTURES)
+        rows = df.reset_index().to_dict("records")
+        for i, entry in enumerate(result):
+            high = next(r for r in rows if r["cusip"] == entry["higher_cusip"])
+            low  = next(r for r in rows if r["cusip"] == entry["lower_cusip"])
+            f_star = entry["f_star"]
+            ir_h = implied_repo(high["cash_price"], f_star, high["conv_factor"],
+                                high["coupon"], DAYS)
+            ir_l = implied_repo(low["cash_price"],  f_star, low["conv_factor"],
+                                low["coupon"], DAYS)
+            assert abs(ir_h - ir_l) < 1e-6, (
+                f"Pair {entry['higher_label']} / {entry['lower_label']}: "
+                f"implied repos not equal at F*={f_star}"
+            )
+
+    def test_direction_consistent_with_distance(self):
+        """direction must be consistent with the sign of distance_pts."""
+        for entry in self._map():
+            if entry["distance_pts"] > 1e-4:
+                assert entry["direction"] == "RALLY"
+            elif entry["distance_pts"] < -1e-4:
+                assert entry["direction"] == "SELLOFF"
+            else:
+                assert entry["direction"] == "AT_THRESHOLD"
+
+    def test_single_bond_raises(self):
+        df = _ranked_df_with_days().iloc[:1]
+        with pytest.raises(ValueError, match="at least 2"):
+            basket_switch_map(df, FUTURES)
+
+    def test_two_bond_basket(self):
+        """Two-bond basket produces exactly one entry."""
+        df = _ranked_df_with_days().iloc[:2]
+        result = basket_switch_map(df, FUTURES)
+        assert len(result) == 1
+
+    def test_days_inferred_without_column(self):
+        """basket_switch_map must not crash when days_to_delivery column is absent."""
+        df = _ranked_df_with_days().drop(columns=["days_to_delivery"])
+        result = basket_switch_map(df, FUTURES)
+        # Result length and direction validity are the key assertions
+        assert len(result) == len(df) - 1
+        for entry in result:
+            assert entry["direction"] in {"RALLY", "SELLOFF", "AT_THRESHOLD"}
