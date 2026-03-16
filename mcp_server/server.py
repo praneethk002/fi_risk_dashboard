@@ -40,7 +40,7 @@ from mcp.server.fastmcp import FastMCP
 from data.db import BasisDB
 from core.basket import get_basket, bond_label, DELIVERY_DATE
 from core.scenario import scenario_grid as _scenario_grid
-from core.ctd import ctd_transition_threshold as _ctd_threshold
+from core.ctd import ctd_transition_threshold as _ctd_threshold, switch_direction as _switch_direction, basket_switch_map as _basket_switch_map
 from core.carry import carry as _carry
 from core.pricing import price_bond as _price_bond
 from data.fred_client import get_yield_curve as _get_fred_curve
@@ -468,11 +468,12 @@ def get_ctd_transition_threshold(contract: str = "TYM26") -> dict:
         "spread_bps":                        spread_bps,
         "transition_threshold_futures_price": round(threshold, 4),
         "distance_to_threshold_pts":         distance,
+        "direction":                         _switch_direction(threshold, current_f),
         "note": (
             "threshold = F* at which implied_repo_CTD(F*) = implied_repo_runner_up(F*). "
             "Derived in closed form from the cost-of-carry no-arbitrage equation. "
-            "Positive distance = futures must rally to trigger switch; "
-            "negative distance = switch occurs only on a futures decline of that magnitude."
+            "direction: RALLY = futures must rise to trigger switch; "
+            "SELLOFF = futures must fall; AT_THRESHOLD = switch is live now."
         ),
     }
 
@@ -596,6 +597,67 @@ def get_carry_roll(
             "Roll-down uses FRED curve interpolation (first-order approx)."
         ),
     }
+
+
+# ── Tool 9: Full basket switch map ───────────────────────────────────────────
+
+@mcp.tool()
+def get_basket_switch_map(contract: str = "TYM26") -> list[dict] | dict:
+    """Transition thresholds for every consecutive pair in the ranked basket.
+
+    Unlike get_ctd_transition_threshold (which only covers CTD vs runner-up),
+    this tool returns F* for *all* adjacent pairs — rank 1→2, 2→3, 3→4, etc.
+    Results are sorted by |distance_pts| ascending so the nearest potential
+    switch always appears first.
+
+    This is useful for detecting compound risk: e.g. if bonds 2 and 3 are
+    very close to switching while bond 1 is already near its threshold, a
+    large yield move could cascade through the basket.
+
+    Args:
+        contract: Futures contract identifier (e.g. "TYM26").
+
+    Returns:
+        List of dicts sorted by |distance_pts| ascending, each containing:
+            higher_rank, lower_rank, higher_cusip, lower_cusip,
+            higher_label, lower_label, higher_ir (%), lower_ir (%),
+            spread_bps, f_star, distance_pts, direction
+        or {"error": "..."} if insufficient data.
+    """
+    snapshot = db_client.query_basket_snapshot(contract)
+    if isinstance(snapshot, str):
+        return {"error": snapshot}
+    if len(snapshot) < 2:
+        return {"error": "Need at least 2 bonds to compute switch map."}
+
+    basket    = get_basket(use_api=False)
+    label_map = {b["cusip"]: bond_label(b) for b in basket}
+
+    import pandas as pd
+    df = pd.DataFrame(snapshot)
+    # db_client stores implied_repo as percentage; convert to decimal for core functions
+    df["implied_repo"]     = df["implied_repo_pct"] / 100
+    df["coupon"]           = df["coupon_pct"] / 100
+    df["days_to_delivery"] = df["days_to_delivery"].astype(int)
+    df["label"]            = df["cusip"].map(label_map)
+    df = df.drop(columns=["rank"], errors="ignore")
+    df.index               = range(1, len(df) + 1)
+    df.index.name          = "rank"
+
+    try:
+        switch_map = _basket_switch_map(df, float(df.iloc[0]["futures_price"]))
+    except (ValueError, ZeroDivisionError) as exc:
+        return {"error": str(exc)}
+
+    # Replace raw cusips with human-readable labels in output
+    for entry in switch_map:
+        entry["higher_label"] = label_map.get(entry["higher_cusip"], entry["higher_label"])
+        entry["lower_label"]  = label_map.get(entry["lower_cusip"],  entry["lower_label"])
+        # Convert implied_repo back to percentage for consistency with other tools
+        entry["higher_ir_pct"] = round(entry.pop("higher_ir") * 100, 4)
+        entry["lower_ir_pct"]  = round(entry.pop("lower_ir")  * 100, 4)
+
+    return switch_map
 
 
 if __name__ == "__main__":
